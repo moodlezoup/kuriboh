@@ -21,3 +21,4 @@ serde_json = "1"
 # Structured logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3.26.0"

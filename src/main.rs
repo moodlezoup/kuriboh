@@ -3,21 +3,21 @@ mod cli;
 mod events;
 mod report;
 mod runner;
-mod sandbox;
 
 use anyhow::{bail, Result};
 use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let mut args = cli::parse();
+
+    let default_level = if args.verbose { "kuriboh=debug" } else { "kuriboh=info" };
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("kuriboh=info".parse()?),
+                .add_directive(default_level.parse()?),
         )
         .init();
-
-    let mut args = cli::parse();
 
     // Validate --target early (before expensive agent work).
     args.target = std::fs::canonicalize(&args.target).map_err(|e| {
@@ -43,15 +43,11 @@ async fn main() -> Result<()> {
 
     info!(target = %args.target.display(), "Starting kuriboh security review");
 
-    let sandbox = sandbox::SandboxConfig {
-        enabled: !args.no_sandbox,
-    };
-
     // 1. Write subagent definitions into the target's .claude/agents/ directory.
     agents::install(&args.target, &args.agents_config)?;
 
     // 2. Spawn Claude Code and stream NDJSON events.
-    let event_stream = runner::run(&args, &sandbox).await?;
+    let event_stream = runner::run(&args).await?;
 
     // 3. Parse events into a structured report and write it out.
     let report = report::parse(&event_stream)?;

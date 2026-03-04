@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::process::Stdio;
 
 use anyhow::{bail, Context, Result};
@@ -5,20 +6,22 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::cli::Args;
-use crate::events::{self, ClaudeEvent};
-use crate::sandbox::SandboxConfig;
+use crate::events::{self, ClaudeEvent, ContentBlock};
 
-/// Spawn Claude Code (via Docker AI Sandbox), stream its `stream-json` output
-/// line-by-line, and return the full sequence of parsed [`ClaudeEvent`]s.
+/// Spawn Claude Code, stream its `stream-json` output line-by-line, and
+/// return the full sequence of parsed [`ClaudeEvent`]s.
 ///
 /// The caller can process events in real time (e.g. to feed a TUI) before this
 /// function returns, by instead adapting this to yield events via a channel —
 /// the streaming architecture makes that straightforward.
-pub async fn run(args: &Args, sandbox: &SandboxConfig) -> Result<Vec<ClaudeEvent>> {
+pub async fn run(args: &Args) -> Result<Vec<ClaudeEvent>> {
     let prompt = build_prompt(args);
 
-    // Flags passed to `claude` (sandbox.build_command may prepend more).
-    let claude_args = vec![
+    let mut claude_args = Vec::new();
+    if args.dangerously_skip_permissions {
+        claude_args.push("--dangerously-skip-permissions".to_string());
+    }
+    claude_args.extend([
         "--model".to_string(),
         args.model.clone(),
         "--max-turns".to_string(),
@@ -30,27 +33,27 @@ pub async fn run(args: &Args, sandbox: &SandboxConfig) -> Result<Vec<ClaudeEvent
         // Non-interactive print mode.
         "-p".to_string(),
         prompt,
-    ];
+    ]);
 
-    let (program, argv) = sandbox.build_command(&args.target, claude_args);
+    let program = "claude";
 
     tracing::info!(
         %program,
         model = %args.model,
         max_turns = args.max_turns,
-        sandbox = sandbox.enabled,
+        skip_permissions = args.dangerously_skip_permissions,
         "Spawning Claude Code"
     );
     // Full command at DEBUG to avoid leaking the orchestration prompt in CI logs.
     tracing::debug!(
-        cmd = %format!("{program} {}", argv.iter().map(|a| {
+        cmd = %format!("{program} {}", claude_args.iter().map(|a| {
             if a.contains(' ') || a.contains('"') { format!("'{a}'") } else { a.clone() }
         }).collect::<Vec<_>>().join(" ")),
         "Full command"
     );
 
-    let mut child = Command::new(&program)
-        .args(&argv)
+    let mut child = Command::new(program)
+        .args(&claude_args)
         // Prevent nested Claude Code session detection from blocking the subprocess.
         .env_remove("CLAUDECODE")
         .stdout(Stdio::piped())
@@ -76,6 +79,9 @@ pub async fn run(args: &Args, sandbox: &SandboxConfig) -> Result<Vec<ClaudeEvent
                     None => break,
                     Some(l) => {
                         if let Some(ev) = events::parse_line(&l) {
+                            if args.verbose {
+                                print_event_text(&ev);
+                            }
                             tracing::debug!(?ev, "event");
                             collected.push(ev);
                         }
@@ -108,6 +114,22 @@ pub async fn run(args: &Args, sandbox: &SandboxConfig) -> Result<Vec<ClaudeEvent
     }
 
     Ok(collected)
+}
+
+/// Print assistant text content to stderr for `--verbose` mode.
+fn print_event_text(ev: &ClaudeEvent) {
+    let blocks = match ev {
+        ClaudeEvent::Assistant { message, .. } => &message.content,
+        _ => return,
+    };
+    let stderr = std::io::stderr();
+    let mut lock = stderr.lock();
+    for block in blocks {
+        if let ContentBlock::Text { text } = block {
+            let _ = lock.write_all(text.as_bytes());
+            let _ = lock.flush();
+        }
+    }
 }
 
 /// Builds the phased orchestration prompt for the agent team lead.

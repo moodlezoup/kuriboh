@@ -52,14 +52,24 @@ pub struct Args {
     #[arg(long)]
     pub json: bool,
 
-    /// Disable sandboxing and `--dangerously-skip-permissions`.
+    /// Pass `--dangerously-skip-permissions` to Claude Code.
     ///
-    /// By default, kuriboh passes `--dangerously-skip-permissions` to Claude
-    /// Code, relying on Claude Code's native sandbox (bubblewrap/Seatbelt) for
-    /// filesystem and network isolation. With `--no-sandbox`, the flag is
-    /// omitted and the user retains per-tool confirmation prompts.
+    /// Disables all per-tool confirmation prompts in the inner Claude Code
+    /// session. Only safe when Claude Code's native sandbox
+    /// (bubblewrap/Seatbelt) is active, or when running inside a Docker AI
+    /// Sandbox / container with its own isolation boundary.
+    ///
+    /// Without this flag, Claude Code will prompt for permission on each
+    /// tool use, which requires an interactive terminal.
     #[arg(long)]
-    pub no_sandbox: bool,
+    pub dangerously_skip_permissions: bool,
+
+    /// Show Claude Code's output in real time as the review progresses.
+    ///
+    /// Streams the agent's text to stderr so you can follow along with
+    /// each phase. Also enables debug-level tracing logs.
+    #[arg(short, long)]
+    pub verbose: bool,
 
     /// Keep the `.kuriboh/` workspace directory after the run.
     ///

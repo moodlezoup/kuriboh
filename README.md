@@ -35,11 +35,11 @@ cargo install --path .
 ## Usage
 
 ```bash
-# Standard usage (with native sandbox + --dangerously-skip-permissions)
+# Standard usage (interactive permission prompts)
 kuriboh --target /path/to/rust/crate
 
-# Without sandbox (retains per-tool confirmation prompts)
-kuriboh --target ./my-crate --no-sandbox
+# Skip permission prompts (requires sandbox or container isolation)
+kuriboh --target ./my-crate --dangerously-skip-permissions
 
 # Customize output
 kuriboh --target ./my-crate --output report.json --json
@@ -61,7 +61,7 @@ kuriboh --target ./my-crate --keep-workspace
 | `--reviewers N` | dynamic | Number of reviewer agents (default: `ceil(sqrt(files))` clamped [3,12]) |
 | `--max-turns N` | `400` | Max turns for the Claude Code session |
 | `--json` | off | Force JSON output regardless of file extension |
-| `--no-sandbox` | off | Disable `--dangerously-skip-permissions` (retains prompts) |
+| `--dangerously-skip-permissions` | off | Pass `--dangerously-skip-permissions` to Claude Code |
 | `--keep-workspace` | off | Preserve `.kuriboh/` directory after the run |
 | `--agents NAMES` | all | Comma-separated agent names to deploy |
 | `--agents-config PATH` | none | TOML file for customizing agent prompts |
