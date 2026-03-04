@@ -29,16 +29,16 @@ cargo install --path .
 ### Requirements
 
 - [Claude Code](https://docs.anthropic.com/en/docs/claude-code) (`claude` CLI on PATH)
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/) with AI Sandbox support (for production use)
 - Rust toolchain (for building kuriboh itself)
+- Claude Code's native sandbox enabled (`/sandbox` in Claude Code) for safe autonomous operation
 
 ## Usage
 
 ```bash
-# Standard usage (Docker sandbox, recommended)
+# Standard usage (with native sandbox + --dangerously-skip-permissions)
 kuriboh --target /path/to/rust/crate
 
-# Local development (no Docker)
+# Without sandbox (retains per-tool confirmation prompts)
 kuriboh --target ./my-crate --no-sandbox
 
 # Customize output
@@ -61,7 +61,7 @@ kuriboh --target ./my-crate --keep-workspace
 | `--reviewers N` | dynamic | Number of reviewer agents (default: `ceil(sqrt(files))` clamped [3,12]) |
 | `--max-turns N` | `400` | Max turns for the Claude Code session |
 | `--json` | off | Force JSON output regardless of file extension |
-| `--no-sandbox` | off | Run `claude` directly without Docker sandbox |
+| `--no-sandbox` | off | Disable `--dangerously-skip-permissions` (retains prompts) |
 | `--keep-workspace` | off | Preserve `.kuriboh/` directory after the run |
 | `--agents NAMES` | all | Comma-separated agent names to deploy |
 | `--agents-config PATH` | none | TOML file for customizing agent prompts |
@@ -91,7 +91,7 @@ src/
   runner.rs         -- Spawns Claude Code, streams NDJSON events, builds orchestration prompt
   events.rs         -- ClaudeEvent model for --output-format stream-json
   report.rs         -- Report/Finding structs, Markdown/JSON rendering
-  sandbox.rs        -- Docker AI Sandbox command builder
+  sandbox.rs        -- Sandbox config (controls --dangerously-skip-permissions)
   agents/
     mod.rs          -- Agent installation (.claude/agents/) and .kuriboh/ lifecycle
     templates.rs    -- 6 embedded subagent definitions

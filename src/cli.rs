@@ -52,10 +52,12 @@ pub struct Args {
     #[arg(long)]
     pub json: bool,
 
-    /// Disable the Docker AI Sandbox and run `claude` directly on the host.
+    /// Disable sandboxing and `--dangerously-skip-permissions`.
     ///
-    /// Only use this for local development. Production runs should always use
-    /// the sandbox so that `--dangerously-skip-permissions` is safe.
+    /// By default, kuriboh passes `--dangerously-skip-permissions` to Claude
+    /// Code, relying on Claude Code's native sandbox (bubblewrap/Seatbelt) for
+    /// filesystem and network isolation. With `--no-sandbox`, the flag is
+    /// omitted and the user retains per-tool confirmation prompts.
     #[arg(long)]
     pub no_sandbox: bool,
 

@@ -17,19 +17,12 @@ use crate::sandbox::SandboxConfig;
 pub async fn run(args: &Args, sandbox: &SandboxConfig) -> Result<Vec<ClaudeEvent>> {
     let prompt = build_prompt(args);
 
-    // All flags passed to the `claude` binary (inside or outside the sandbox).
-    let mut claude_args = vec![
+    // Flags passed to `claude` (sandbox.build_command may prepend more).
+    let claude_args = vec![
         "--model".to_string(),
         args.model.clone(),
         "--max-turns".to_string(),
         args.max_turns.to_string(),
-    ];
-    // --dangerously-skip-permissions is only safe inside the Docker sandbox.
-    // Without the sandbox, the user retains per-tool confirmation prompts.
-    if sandbox.enabled {
-        claude_args.push("--dangerously-skip-permissions".to_string());
-    }
-    claude_args.extend([
         // --verbose is required for stream-json with --print.
         "--verbose".to_string(),
         "--output-format".to_string(),
@@ -37,7 +30,7 @@ pub async fn run(args: &Args, sandbox: &SandboxConfig) -> Result<Vec<ClaudeEvent
         // Non-interactive print mode.
         "-p".to_string(),
         prompt,
-    ]);
+    ];
 
     let (program, argv) = sandbox.build_command(&args.target, claude_args);
 

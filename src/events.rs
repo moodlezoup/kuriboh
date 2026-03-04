@@ -99,17 +99,18 @@ pub struct TokenUsage {
 
 /// Parse one NDJSON line from the claude event stream.
 ///
-/// Returns `None` for blank lines or lines that fail to parse (the error is
-/// logged at `WARN` so the caller can continue streaming).
+/// Returns `None` for blank lines or non-JSON lines. Only lines that start
+/// with `{` but fail to parse are logged (at DEBUG), since `--verbose` mode
+/// produces many non-JSON lines (ANSI sequences, progress text, etc.).
 pub fn parse_line(line: &str) -> Option<ClaudeEvent> {
     let trimmed = line.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || !trimmed.starts_with('{') {
         return None;
     }
     match serde_json::from_str(trimmed) {
         Ok(ev) => Some(ev),
         Err(e) => {
-            tracing::warn!("Skipping unparseable event ({e}): {trimmed}");
+            tracing::debug!("Skipping malformed JSON event ({e}): {}", &trimmed[..trimmed.len().min(200)]);
             None
         }
     }

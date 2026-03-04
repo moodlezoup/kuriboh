@@ -37,7 +37,7 @@ The project has no tests yet. Verify changes with `cargo build` (must produce 0 
 
 - `runner.rs` -- Spawns Claude Code subprocess, streams stdout/stderr concurrently with `tokio::select!`, builds the orchestration prompt. TUI hook point: replace `Vec<ClaudeEvent>` with a channel sender.
 - `events.rs` -- `ClaudeEvent` enum modeling Claude Code's `--output-format stream-json` NDJSON. Types: System, Assistant, User, Result.
-- `sandbox.rs` -- `SandboxConfig::build_command()` returns `(program, argv)`. Sandboxed mode uses `docker sandbox run` with `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`. Unsandboxed mode calls `claude` directly.
+- `sandbox.rs` -- `SandboxConfig::build_command()` returns `(program, argv)`. Sandboxed mode adds `--dangerously-skip-permissions` (relying on Claude Code's native OS-level sandbox). Unsandboxed mode omits it.
 - `agents/templates.rs` -- 6 subagent definitions as `pub const &str` with YAML frontmatter + Markdown prompt. Agents: scout, reviewer, appraiser, unsafe-auditor, dep-checker, crypto-reviewer.
 - `agents/mod.rs` -- `BUILTIN_AGENTS` registry, `install()` writes `.claude/agents/*.md` and creates `.kuriboh/{findings,worktrees,pocs}`, `cleanup()` handles git worktree removal then deletes `.kuriboh/`.
 - `report.rs` -- `Report` and `Finding` structs with serde. `Finding` includes call_chain, poc_available/validated/path, verdict, appraiser_notes, independent_reviewers. Renders Markdown or JSON.
@@ -68,8 +68,8 @@ The project has no tests yet. Verify changes with `cargo build` (must produce 0 
 
 ## Important context
 
-- Running `claude` inside another Claude Code session requires unsetting `CLAUDECODE=1` env var.
-- Docker AI Sandbox mounts the workspace at the same absolute path inside the microVM.
-- `--dangerously-skip-permissions` is safe because the Docker sandbox is the permission boundary.
+- Running `claude` inside another Claude Code session requires unsetting `CLAUDECODE=1` env var — handled by `.env_remove("CLAUDECODE")` in runner.rs.
+- `--dangerously-skip-permissions` is safe because Claude Code's native sandbox (bubblewrap/Seatbelt) restricts filesystem and network access at the OS level.
+- `--verbose` is required when using `--output-format stream-json` with `--print` mode.
 - Scout scoring: weighted linear sum (0-100) of 10 heuristic metrics. See `templates.rs::SCOUT` for the full rubric.
 - Reviewer count default: `ceil(sqrt(total_scored_files))` clamped to [3, 12].

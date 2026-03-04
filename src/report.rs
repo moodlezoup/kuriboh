@@ -134,8 +134,15 @@ fn render_markdown(report: &Report) -> String {
     }
 
     if report.findings.is_empty() && report.needs_review.is_empty() {
-        out.push_str("\n## Full Review Output\n\n");
-        out.push_str(&report.raw_result);
+        // Structured finding extraction is not yet implemented, so raw_result
+        // contains the full compiled report from the lead agent. Append only
+        // the sections NOT already extracted above (skip everything up to and
+        // including the "Review Coverage" section to avoid duplication).
+        let remainder = skip_extracted_sections(&report.raw_result);
+        if !remainder.is_empty() {
+            out.push('\n');
+            out.push_str(&remainder);
+        }
     } else {
         if !report.findings.is_empty() {
             out.push_str("\n## Findings\n\n");
@@ -252,4 +259,33 @@ fn extract_executive_summary(raw: &str) -> String {
     } else {
         summary
     }
+}
+
+/// Skip sections already extracted (Executive Summary, Scouting Overview,
+/// Review Coverage) from the raw result to avoid duplication in the report.
+///
+/// Returns everything from the first heading that is NOT one of the
+/// already-extracted sections.
+fn skip_extracted_sections(raw: &str) -> String {
+    static EXTRACTED: &[&str] = &["executive summary", "scouting overview", "review coverage"];
+
+    let mut lines: Vec<&str> = Vec::new();
+    let mut skipping = true;
+
+    for line in raw.lines() {
+        if line.starts_with('#') {
+            let heading = line.trim_start_matches('#').trim();
+            if EXTRACTED.iter().any(|h| heading.eq_ignore_ascii_case(h)) {
+                skipping = true;
+                continue;
+            }
+            // First non-extracted heading — start keeping lines.
+            skipping = false;
+        }
+        if !skipping {
+            lines.push(line);
+        }
+    }
+
+    lines.join("\n").trim().to_owned()
 }
