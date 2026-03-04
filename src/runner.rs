@@ -21,6 +21,9 @@ pub async fn run(args: &Args) -> Result<Vec<ClaudeEvent>> {
     if args.dangerously_skip_permissions {
         claude_args.push("--dangerously-skip-permissions".to_string());
     }
+    if let Some(budget) = args.max_budget_usd {
+        claude_args.extend(["--max-budget-usd".to_string(), budget.to_string()]);
+    }
     claude_args.extend([
         "--model".to_string(),
         args.model.clone(),
@@ -393,9 +396,13 @@ the same format as above>
 ```
 
 Target codebase: {target}
-Max turns: {max_turns}"#,
+Max turns: {max_turns}{user_guidance}"#,
         reviewers = reviewers_directive,
         target = args.target.display(),
         max_turns = args.max_turns,
+        user_guidance = match &args.prompt {
+            Some(p) => format!("\n\n================================================================================\nUSER GUIDANCE\n================================================================================\n\nThe user has provided the following guidance for this review. Apply it across\nall phases — exploration should pay special attention to the areas mentioned,\nscouting should weight relevant files higher, reviewers should prioritize the\nspecified concerns, and appraisers should evaluate findings in this context:\n\n{p}"),
+            None => String::new(),
+        },
     )
 }

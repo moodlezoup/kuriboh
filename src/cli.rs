@@ -27,6 +27,15 @@ pub struct Args {
     #[arg(long, value_name = "PATH")]
     pub agents_config: Option<PathBuf>,
 
+    /// Custom guidance for reviewer agents.
+    ///
+    /// Injected into the orchestration prompt to focus the review on specific
+    /// areas or bug classes. Examples:
+    ///   --prompt "Focus on the networking layer in src/net/"
+    ///   --prompt "Look for TOCTOU race conditions and symlink attacks"
+    #[arg(short, long, value_name = "TEXT")]
+    pub prompt: Option<String>,
+
     /// Claude model to use for the orchestrating agent team lead
     #[arg(long, default_value = "claude-sonnet-4-6", value_name = "MODEL")]
     pub model: String,
@@ -39,6 +48,13 @@ pub struct Args {
     /// ceil(sqrt(total_scored_files)), clamped to [3, 12].
     #[arg(long, value_name = "N")]
     pub reviewers: Option<u32>,
+
+    /// Maximum dollar amount to spend on API calls.
+    ///
+    /// Passed through to Claude Code as `--max-budget-usd`. The session
+    /// will stop once this budget is exhausted.
+    #[arg(long, value_name = "AMOUNT")]
+    pub max_budget_usd: Option<f64>,
 
     /// Maximum number of turns the agent team is allowed to run.
     ///
@@ -63,6 +79,13 @@ pub struct Args {
     /// tool use, which requires an interactive terminal.
     #[arg(long)]
     pub dangerously_skip_permissions: bool,
+
+    /// Print a cost estimate and exit without running the review.
+    ///
+    /// Scans the target codebase, counts files, computes the reviewer count,
+    /// and prints an estimated cost breakdown by phase.
+    #[arg(long)]
+    pub estimate: bool,
 
     /// Show Claude Code's output in real time as the review progresses.
     ///
