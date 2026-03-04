@@ -1,0 +1,255 @@
+use std::path::Path;
+
+use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+
+use crate::events::{self, ClaudeEvent};
+
+/// Severity of a single security finding.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum Severity {
+    Critical,
+    High,
+    Medium,
+    Low,
+    Info,
+}
+
+/// A single security finding extracted from agent output.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Finding {
+    pub severity: Severity,
+    pub title: String,
+    pub file: Option<String>,
+    pub description: String,
+    pub recommendation: String,
+    /// Which subagent reported this finding.
+    #[serde(default)]
+    pub source_agent: Option<String>,
+    /// Scout-phase weighted score for this file (0-100), if available.
+    #[serde(default)]
+    pub scout_score: Option<u32>,
+    /// The call chain from entry point to vulnerability site.
+    #[serde(default)]
+    pub call_chain: Vec<String>,
+    /// Whether a proof-of-concept was provided by the reviewer.
+    #[serde(default)]
+    pub poc_available: bool,
+    /// Whether the appraiser validated the PoC successfully.
+    #[serde(default)]
+    pub poc_validated: Option<bool>,
+    /// Path to the PoC file, if any.
+    #[serde(default)]
+    pub poc_path: Option<String>,
+    /// Appraisal verdict: "confirmed", "adjusted", "rejected", or "needs-review".
+    #[serde(default)]
+    pub verdict: Option<String>,
+    /// Notes from the appraiser about severity adjustments or validation.
+    #[serde(default)]
+    pub appraiser_notes: Option<String>,
+    /// Number of independent reviewers who found this same issue.
+    #[serde(default)]
+    pub independent_reviewers: Option<u32>,
+}
+
+/// The full structured security report.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Report {
+    pub executive_summary: String,
+    /// Summary of the scouting phase (file counts per tier, top-risk patterns).
+    #[serde(default)]
+    pub scouting_summary: Option<String>,
+    /// Summary of review coverage (reviewers, files reviewed, tier coverage).
+    #[serde(default)]
+    pub review_coverage: Option<String>,
+    pub findings: Vec<Finding>,
+    /// Findings that the appraiser flagged as needing human review.
+    #[serde(default)]
+    pub needs_review: Vec<Finding>,
+    /// Token cost across all agents and teammates in the run.
+    pub total_cost_usd: f64,
+    /// The raw synthesized text from the lead agent's final result event.
+    pub raw_result: String,
+}
+
+/// Build a `Report` from the event stream produced by a claude run.
+pub fn parse(event_stream: &[ClaudeEvent]) -> Result<Report> {
+    let raw_result = events::final_result(event_stream)
+        .unwrap_or("")
+        .to_owned();
+
+    // TODO: implement structured Markdown → Finding extraction by parsing
+    // the `### [SEVERITY] <title>` sections in raw_result.
+    Ok(Report {
+        executive_summary: extract_executive_summary(&raw_result),
+        scouting_summary: extract_section(&raw_result, "scouting overview"),
+        review_coverage: extract_section(&raw_result, "review coverage"),
+        findings: vec![],
+        needs_review: vec![],
+        total_cost_usd: events::total_cost_usd(event_stream),
+        raw_result,
+    })
+}
+
+/// Write the report to `path`.
+///
+/// Format is inferred from the file extension: `.json` → JSON, anything else
+/// → Markdown. The `--json` flag in [`crate::cli::Args`] overrides the output
+/// path extension.
+pub fn write(report: &Report, path: &Path, force_json: bool) -> Result<()> {
+    let is_json =
+        force_json || path.extension().and_then(|e| e.to_str()) == Some("json");
+
+    let content = if is_json {
+        serde_json::to_string_pretty(report).context("serializing report to JSON")?
+    } else {
+        render_markdown(report)
+    };
+
+    std::fs::write(path, content)
+        .with_context(|| format!("writing report to {}", path.display()))?;
+
+    Ok(())
+}
+
+fn render_markdown(report: &Report) -> String {
+    let mut out = String::new();
+    out.push_str("# Kuriboh Security Review Report\n\n");
+
+    out.push_str("## Executive Summary\n\n");
+    out.push_str(&report.executive_summary);
+    out.push('\n');
+
+    if let Some(scouting) = &report.scouting_summary {
+        out.push_str("\n## Scouting Overview\n\n");
+        out.push_str(scouting);
+        out.push('\n');
+    }
+
+    if let Some(coverage) = &report.review_coverage {
+        out.push_str("\n## Review Coverage\n\n");
+        out.push_str(coverage);
+        out.push('\n');
+    }
+
+    if report.findings.is_empty() && report.needs_review.is_empty() {
+        out.push_str("\n## Full Review Output\n\n");
+        out.push_str(&report.raw_result);
+    } else {
+        if !report.findings.is_empty() {
+            out.push_str("\n## Findings\n\n");
+            for f in &report.findings {
+                render_finding(&mut out, f);
+            }
+        }
+
+        if !report.needs_review.is_empty() {
+            out.push_str("\n## Needs Review\n\n");
+            out.push_str("*These findings require human judgment to confirm or dismiss.*\n\n");
+            for f in &report.needs_review {
+                render_finding(&mut out, f);
+            }
+        }
+    }
+
+    out.push_str(&format!(
+        "\n---\n*Total cost: ${:.4}*\n",
+        report.total_cost_usd
+    ));
+    out
+}
+
+fn render_finding(out: &mut String, f: &Finding) {
+    out.push_str(&format!("### [{:?}] {}\n", f.severity, f.title));
+    if let Some(file) = &f.file {
+        out.push_str(&format!("- **File**: `{file}`\n"));
+    }
+    if let Some(score) = f.scout_score {
+        out.push_str(&format!("- **Scout Score**: {score}\n"));
+    }
+    if !f.call_chain.is_empty() {
+        out.push_str(&format!("- **Call Chain**: {}\n", f.call_chain.join(" -> ")));
+    }
+    out.push_str(&format!("- **Description**: {}\n", f.description));
+    out.push_str(&format!("- **Recommendation**: {}\n", f.recommendation));
+    if f.poc_available {
+        let status = match f.poc_validated {
+            Some(true) => "validated",
+            Some(false) => "available (not validated)",
+            None => "available",
+        };
+        out.push_str(&format!("- **PoC**: {status}"));
+        if let Some(path) = &f.poc_path {
+            out.push_str(&format!(" (`{path}`)"));
+        }
+        out.push('\n');
+    }
+    if let Some(n) = f.independent_reviewers {
+        if n > 1 {
+            out.push_str(&format!("- **Independent Reviewers**: {n}\n"));
+        }
+    }
+    if let Some(notes) = &f.appraiser_notes {
+        out.push_str(&format!("- **Appraiser Notes**: {notes}\n"));
+    }
+    out.push('\n');
+}
+
+/// Extract a named Markdown section (case-insensitive heading match).
+///
+/// Returns the body text between the matched `## <heading>` and the next
+/// heading of the same or higher level, or `None` if the section is absent.
+fn extract_section(raw: &str, heading: &str) -> Option<String> {
+    let mut in_section = false;
+    let mut lines: Vec<&str> = Vec::new();
+
+    for line in raw.lines() {
+        if line.trim_start_matches('#').trim().eq_ignore_ascii_case(heading) {
+            in_section = true;
+            continue;
+        }
+        if in_section {
+            if line.starts_with('#') {
+                break;
+            }
+            lines.push(line);
+        }
+    }
+
+    let body = lines.join("\n").trim().to_owned();
+    if body.is_empty() { None } else { Some(body) }
+}
+
+/// Best-effort extraction of the Executive Summary section from Markdown output.
+fn extract_executive_summary(raw: &str) -> String {
+    // Find the "Executive Summary" heading and collect lines until the next heading.
+    let mut in_summary = false;
+    let mut lines: Vec<&str> = Vec::new();
+
+    for line in raw.lines() {
+        if line.trim_start_matches('#').trim().eq_ignore_ascii_case("executive summary") {
+            in_summary = true;
+            continue;
+        }
+        if in_summary {
+            if line.starts_with('#') {
+                break;
+            }
+            lines.push(line);
+        }
+    }
+
+    let summary = lines.join("\n").trim().to_owned();
+    if summary.is_empty() {
+        // Fallback: first non-empty paragraph before any heading.
+        raw.lines()
+            .skip_while(|l| l.trim().is_empty() || l.starts_with('#'))
+            .take(5)
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        summary
+    }
+}
