@@ -18,20 +18,26 @@ pub async fn run(args: &Args, sandbox: &SandboxConfig) -> Result<Vec<ClaudeEvent
     let prompt = build_prompt(args);
 
     // All flags passed to the `claude` binary (inside or outside the sandbox).
-    let claude_args = vec![
+    let mut claude_args = vec![
         "--model".to_string(),
         args.model.clone(),
         "--max-turns".to_string(),
         args.max_turns.to_string(),
-        // Safe because the Docker sandbox is our permission boundary.
-        "--dangerously-skip-permissions".to_string(),
-        // Emit NDJSON so we can parse events as they arrive.
+    ];
+    // --dangerously-skip-permissions is only safe inside the Docker sandbox.
+    // Without the sandbox, the user retains per-tool confirmation prompts.
+    if sandbox.enabled {
+        claude_args.push("--dangerously-skip-permissions".to_string());
+    }
+    claude_args.extend([
+        // --verbose is required for stream-json with --print.
+        "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
         // Non-interactive print mode.
         "-p".to_string(),
         prompt,
-    ];
+    ]);
 
     let (program, argv) = sandbox.build_command(&args.target, claude_args);
 
@@ -42,10 +48,18 @@ pub async fn run(args: &Args, sandbox: &SandboxConfig) -> Result<Vec<ClaudeEvent
         sandbox = sandbox.enabled,
         "Spawning Claude Code"
     );
-    tracing::debug!(?argv);
+    // Full command at DEBUG to avoid leaking the orchestration prompt in CI logs.
+    tracing::debug!(
+        cmd = %format!("{program} {}", argv.iter().map(|a| {
+            if a.contains(' ') || a.contains('"') { format!("'{a}'") } else { a.clone() }
+        }).collect::<Vec<_>>().join(" ")),
+        "Full command"
+    );
 
     let mut child = Command::new(&program)
         .args(&argv)
+        // Prevent nested Claude Code session detection from blocking the subprocess.
+        .env_remove("CLAUDECODE")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
