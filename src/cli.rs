@@ -94,6 +94,22 @@ pub struct Args {
     #[arg(short, long)]
     pub verbose: bool,
 
+    /// Resume a previous run from `.kuriboh/state.json`.
+    ///
+    /// Skips phases that already completed successfully. Re-runs phases
+    /// that were running or failed. Validates that --target matches the
+    /// stored target path.
+    #[arg(long)]
+    pub resume: bool,
+
+    /// Seed for reproducible task assignments.
+    ///
+    /// Controls the weighted-random reviewer-to-file mapping in Phase 3.
+    /// If omitted, a random seed is generated. Stored in state.json so
+    /// `--resume` reuses the same seed.
+    #[arg(long, value_name = "N")]
+    pub seed: Option<u64>,
+
     /// Keep the `.kuriboh/` workspace directory after the run.
     ///
     /// Useful for debugging: inspect `exploration.md`, `scores.json`, and other
