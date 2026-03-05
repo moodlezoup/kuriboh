@@ -24,11 +24,67 @@ pub struct PhaseState {
     pub reason: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewerLens {
+    MemorySafety,
+    Parsing,
+    Filesystem,
+    Concurrency,
+    Crypto,
+}
+
+impl ReviewerLens {
+    pub const ALL: &[ReviewerLens] = &[
+        ReviewerLens::MemorySafety,
+        ReviewerLens::Parsing,
+        ReviewerLens::Filesystem,
+        ReviewerLens::Concurrency,
+        ReviewerLens::Crypto,
+    ];
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            ReviewerLens::MemorySafety => "memory-safety",
+            ReviewerLens::Parsing => "parsing",
+            ReviewerLens::Filesystem => "filesystem",
+            ReviewerLens::Concurrency => "concurrency",
+            ReviewerLens::Crypto => "crypto",
+        }
+    }
+
+    pub fn description(&self) -> &'static str {
+        match self {
+            ReviewerLens::MemorySafety => {
+                "Focus on unsafe blocks, raw pointers, aliasing, use-after-free, and Send/Sync soundness"
+            }
+            ReviewerLens::Parsing => {
+                "Focus on input parsing, deserialization, integer overflow, and buffer handling"
+            }
+            ReviewerLens::Filesystem => {
+                "Focus on path traversal, symlink attacks, TOCTOU races, and permission issues"
+            }
+            ReviewerLens::Concurrency => {
+                "Focus on data races, deadlocks, lock ordering, and atomic ordering correctness"
+            }
+            ReviewerLens::Crypto => {
+                "Focus on weak algorithms, nonce reuse, key management, and side-channel leaks"
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskAssignment {
     pub reviewer_id: u32,
     pub starting_file: String,
     pub scout_score: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lens: Option<ReviewerLens>,
+    #[serde(default)]
+    pub mandatory: bool,
+    #[serde(default)]
+    pub reserve: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +100,8 @@ pub struct State {
     pub reviewer_count: u32,
     #[serde(default)]
     pub task_assignments: Vec<TaskAssignment>,
+    #[serde(default)]
+    pub reserve_count: u32,
 }
 
 pub const PHASE_ORDER: &[&str] = &[
@@ -79,6 +137,7 @@ impl State {
             files: Vec::new(),
             reviewer_count: 0,
             task_assignments: Vec::new(),
+            reserve_count: 0,
         }
     }
 
@@ -193,7 +252,11 @@ mod tests {
             reviewer_id: 1,
             starting_file: "src/main.rs".to_string(),
             scout_score: 75,
+            lens: Some(ReviewerLens::MemorySafety),
+            mandatory: true,
+            reserve: false,
         }];
+        state.reserve_count = 2;
         state.phase_mut("exploration").status = PhaseStatus::Done;
         state.phase_mut("exploration").cost_usd = Some(0.15);
 
@@ -203,6 +266,13 @@ mod tests {
         assert_eq!(loaded.seed, 42);
         assert_eq!(loaded.files.len(), 1);
         assert_eq!(loaded.task_assignments.len(), 1);
+        assert_eq!(
+            loaded.task_assignments[0].lens,
+            Some(ReviewerLens::MemorySafety)
+        );
+        assert!(loaded.task_assignments[0].mandatory);
+        assert!(!loaded.task_assignments[0].reserve);
+        assert_eq!(loaded.reserve_count, 2);
         assert_eq!(loaded.phase_status("exploration"), &PhaseStatus::Done);
         assert_eq!(loaded.phase_status("scouting"), &PhaseStatus::Pending);
     }
@@ -257,11 +327,17 @@ mod tests {
                 reviewer_id: 1,
                 starting_file: "a.rs".into(),
                 scout_score: 50,
+                lens: None,
+                mandatory: false,
+                reserve: false,
             },
             TaskAssignment {
                 reviewer_id: 2,
                 starting_file: "b.rs".into(),
                 scout_score: 60,
+                lens: None,
+                mandatory: false,
+                reserve: false,
             },
         ];
 
@@ -270,5 +346,35 @@ mod tests {
 
         std::fs::write(kb.join("reviewer-2.json"), "[]").unwrap();
         assert!(check_sentinel(dir.path(), "deep_review", &state).unwrap());
+    }
+
+    #[test]
+    fn legacy_state_json_deserializes() {
+        // Old-format JSON without lens/mandatory/reserve/reserve_count fields.
+        let json = r#"{
+            "version": 1,
+            "started_at": "1234567890",
+            "target": "/tmp/test",
+            "seed": 42,
+            "phases": {
+                "exploration": {"status": "done"},
+                "scouting": {"status": "pending"},
+                "deep_review": {"status": "pending"},
+                "appraisal_compilation": {"status": "pending"}
+            },
+            "files": ["src/main.rs"],
+            "reviewer_count": 3,
+            "task_assignments": [
+                {"reviewer_id": 1, "starting_file": "src/main.rs", "scout_score": 75}
+            ]
+        }"#;
+
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.seed, 42);
+        assert_eq!(state.reserve_count, 0);
+        assert_eq!(state.task_assignments.len(), 1);
+        assert_eq!(state.task_assignments[0].lens, None);
+        assert!(!state.task_assignments[0].mandatory);
+        assert!(!state.task_assignments[0].reserve);
     }
 }

@@ -6,7 +6,7 @@ use rand::prelude::*;
 use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
 
-use crate::state::TaskAssignment;
+use crate::state::{ReviewerLens, TaskAssignment};
 
 /// Directories to always skip when enumerating `.rs` files.
 const SKIP_DIRS: &[&str] = &["target", "vendor", ".git", ".kuriboh", ".claude"];
@@ -334,47 +334,169 @@ pub fn merge_scores(
         .collect()
 }
 
-/// Generate reviewer task assignments using weighted-random sampling.
+/// Returns indices of files that must have a dedicated reviewer, sorted by score descending.
 ///
-/// Uses a seeded RNG for reproducibility. Higher-scored files are more likely
-/// to be selected. Samples WITH replacement so high-risk files can get
-/// multiple independent reviews.
+/// A file is mandatory if any of:
+/// - Its name is `main.rs` or `lib.rs` (entry point at any depth)
+/// - Its `weighted_score >= 70` (critical threshold)
+/// - It has both `unsafe_density > 0` AND `ffi_declarations > 0`
+pub fn classify_mandatory_files(scores: &[FileScore]) -> Vec<usize> {
+    let mut indices: Vec<usize> = scores
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| {
+            let fname = std::path::Path::new(&s.file)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let is_entry = fname == "main.rs" || fname == "lib.rs";
+            let is_critical = s.weighted_score >= 70;
+            let is_unsafe_ffi =
+                s.static_metrics.unsafe_density > 0 && s.static_metrics.ffi_declarations > 0;
+            is_entry || is_critical || is_unsafe_ffi
+        })
+        .map(|(i, _)| i)
+        .collect();
+    indices.sort_by(|a, b| scores[*b].weighted_score.cmp(&scores[*a].weighted_score));
+    indices
+}
+
+/// Compute how many reserve slots to allocate: `ceil(reviewer_count / 3)` clamped to [1, 4].
+pub fn compute_reserve_count(reviewer_count: u32) -> u32 {
+    let raw = reviewer_count.div_ceil(3);
+    raw.clamp(1, 4)
+}
+
+/// Weighted random selection excluding indices in `exclude`. Falls back to uniform if all
+/// non-excluded weights are zero.
+fn weighted_select(
+    scores: &[FileScore],
+    exclude: &std::collections::HashSet<usize>,
+    rng: &mut SmallRng,
+) -> usize {
+    let weights: Vec<f64> = scores
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            if exclude.contains(&i) {
+                0.0
+            } else {
+                s.weighted_score.max(1) as f64
+            }
+        })
+        .collect();
+    let total: f64 = weights.iter().sum();
+
+    if total <= 0.0 {
+        // All excluded or zero — uniform over non-excluded
+        let available: Vec<usize> = (0..scores.len()).filter(|i| !exclude.contains(i)).collect();
+        if available.is_empty() {
+            // Truly exhausted — pick uniformly from all
+            return rng.random_range(0..scores.len());
+        }
+        return available[rng.random_range(0..available.len())];
+    }
+
+    let mut roll: f64 = rng.random::<f64>() * total;
+    for (i, w) in weights.iter().enumerate() {
+        roll -= w;
+        if roll <= 0.0 {
+            return i;
+        }
+    }
+    scores.len() - 1
+}
+
+/// Generate reviewer task assignments using a 3-stage scheduler.
+///
+/// Returns `(assignments, reserve_count)`.
+///
+/// **Stage 1 — Coverage floor**: mandatory files get dedicated reviewers first.
+/// **Stage 2 — Remaining slots**: filled via weighted sampling WITHOUT replacement.
+/// **Stage 3 — Reserve slots**: extra assignments for adaptive allocation by the lead.
+///
+/// A monotonic lens counter cycles `MemorySafety → Parsing → Filesystem → Concurrency → Crypto`
+/// across all stages, deterministic for a given seed.
 pub fn generate_assignments(
     scores: &[FileScore],
     reviewer_count: u32,
     seed: u64,
-) -> Vec<TaskAssignment> {
+) -> (Vec<TaskAssignment>, u32) {
     if scores.is_empty() || reviewer_count == 0 {
-        return Vec::new();
+        return (Vec::new(), 0);
     }
 
     let mut rng = SmallRng::seed_from_u64(seed);
-
-    let weights: Vec<f64> = scores
-        .iter()
-        .map(|s| s.weighted_score.max(1) as f64)
-        .collect();
-    let total_weight: f64 = weights.iter().sum();
-
     let mut assignments = Vec::new();
-    for id in 1..=reviewer_count {
-        let mut roll: f64 = rng.random::<f64>() * total_weight;
-        let mut selected = scores.len() - 1;
-        for (i, w) in weights.iter().enumerate() {
-            roll -= w;
-            if roll <= 0.0 {
-                selected = i;
-                break;
-            }
-        }
+    let mut lens_counter: usize = 0;
+    let mut next_id: u32 = 1;
+
+    let next_lens = |counter: &mut usize| -> ReviewerLens {
+        let lens = ReviewerLens::ALL[*counter % ReviewerLens::ALL.len()].clone();
+        *counter += 1;
+        lens
+    };
+
+    // Stage 1: Coverage floor — mandatory files
+    let mandatory_indices = classify_mandatory_files(scores);
+    let mandatory_slots = (reviewer_count as usize).min(mandatory_indices.len());
+    let mut used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    for &idx in mandatory_indices.iter().take(mandatory_slots) {
         assignments.push(TaskAssignment {
-            reviewer_id: id,
-            starting_file: scores[selected].file.clone(),
-            scout_score: scores[selected].weighted_score,
+            reviewer_id: next_id,
+            starting_file: scores[idx].file.clone(),
+            scout_score: scores[idx].weighted_score,
+            lens: Some(next_lens(&mut lens_counter)),
+            mandatory: true,
+            reserve: false,
         });
+        used.insert(idx);
+        next_id += 1;
     }
 
-    assignments
+    // Stage 2: Fill remaining primary slots via weighted sampling WITHOUT replacement
+    let remaining_primary = reviewer_count.saturating_sub(mandatory_slots as u32);
+    for _ in 0..remaining_primary {
+        if used.len() >= scores.len() {
+            // All files assigned — reset exclusion to allow repeats
+            used.clear();
+        }
+        let idx = weighted_select(scores, &used, &mut rng);
+        assignments.push(TaskAssignment {
+            reviewer_id: next_id,
+            starting_file: scores[idx].file.clone(),
+            scout_score: scores[idx].weighted_score,
+            lens: Some(next_lens(&mut lens_counter)),
+            mandatory: false,
+            reserve: false,
+        });
+        used.insert(idx);
+        next_id += 1;
+    }
+
+    // Stage 3: Reserve slots
+    let reserve_count = compute_reserve_count(reviewer_count);
+    // Reset exclusion for reserve — target highest remaining
+    let mut reserve_used: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for _ in 0..reserve_count {
+        if reserve_used.len() >= scores.len() {
+            reserve_used.clear();
+        }
+        let idx = weighted_select(scores, &reserve_used, &mut rng);
+        assignments.push(TaskAssignment {
+            reviewer_id: next_id,
+            starting_file: scores[idx].file.clone(),
+            scout_score: scores[idx].weighted_score,
+            lens: Some(next_lens(&mut lens_counter)),
+            mandatory: false,
+            reserve: true,
+        });
+        reserve_used.insert(idx);
+        next_id += 1;
+    }
+
+    (assignments, reserve_count)
 }
 
 /// Compute the dynamic reviewer count: ceil(sqrt(n)) clamped to [3, 12].
@@ -488,35 +610,171 @@ unsafe fn danger() {
         assert!(score > 0);
     }
 
+    /// Helper to build a `FileScore` with just a name and score.
+    fn file_score(name: &str, score: u32) -> FileScore {
+        FileScore {
+            file: name.into(),
+            weighted_score: score,
+            combination_bonus: 0,
+            static_metrics: StaticMetrics::default(),
+            llm_metrics: LlmMetrics::default(),
+            top_concerns: vec![],
+        }
+    }
+
+    /// Helper to build a `FileScore` with custom static metrics.
+    fn file_score_with_metrics(name: &str, score: u32, metrics: StaticMetrics) -> FileScore {
+        FileScore {
+            file: name.into(),
+            weighted_score: score,
+            combination_bonus: 0,
+            static_metrics: metrics,
+            llm_metrics: LlmMetrics::default(),
+            top_concerns: vec![],
+        }
+    }
+
     #[test]
     fn generate_assignments_deterministic() {
-        let scores = vec![
-            FileScore {
-                file: "src/a.rs".into(),
-                weighted_score: 90,
-                combination_bonus: 0,
-                static_metrics: StaticMetrics::default(),
-                llm_metrics: LlmMetrics::default(),
-                top_concerns: vec![],
-            },
-            FileScore {
-                file: "src/b.rs".into(),
-                weighted_score: 10,
-                combination_bonus: 0,
-                static_metrics: StaticMetrics::default(),
-                llm_metrics: LlmMetrics::default(),
-                top_concerns: vec![],
-            },
-        ];
+        let scores = vec![file_score("src/a.rs", 90), file_score("src/b.rs", 10)];
 
-        let a1 = generate_assignments(&scores, 5, 42);
-        let a2 = generate_assignments(&scores, 5, 42);
+        let (a1, r1) = generate_assignments(&scores, 5, 42);
+        let (a2, r2) = generate_assignments(&scores, 5, 42);
 
-        assert_eq!(a1.len(), 5);
+        assert_eq!(r1, r2);
+        // 5 primary + reserve_count reserve slots
+        assert_eq!(a1.len(), a2.len());
         for (x, y) in a1.iter().zip(a2.iter()) {
             assert_eq!(x.starting_file, y.starting_file);
             assert_eq!(x.reviewer_id, y.reviewer_id);
+            assert_eq!(x.lens, y.lens);
+            assert_eq!(x.mandatory, y.mandatory);
+            assert_eq!(x.reserve, y.reserve);
         }
+    }
+
+    #[test]
+    fn coverage_floor_entry_points() {
+        let scores = vec![
+            file_score("src/main.rs", 40),
+            file_score("src/lib.rs", 30),
+            file_score("src/foo.rs", 20),
+        ];
+        let mandatory = classify_mandatory_files(&scores);
+        assert!(mandatory.contains(&0), "main.rs should be mandatory");
+        assert!(mandatory.contains(&1), "lib.rs should be mandatory");
+        assert!(!mandatory.contains(&2), "foo.rs should not be mandatory");
+    }
+
+    #[test]
+    fn coverage_floor_critical_threshold() {
+        let scores = vec![
+            file_score("src/danger.rs", 75),
+            file_score("src/safe.rs", 69),
+        ];
+        let mandatory = classify_mandatory_files(&scores);
+        assert!(mandatory.contains(&0), "score >= 70 should be mandatory");
+        assert!(
+            !mandatory.contains(&1),
+            "score < 70 should not be mandatory"
+        );
+    }
+
+    #[test]
+    fn coverage_floor_unsafe_ffi() {
+        let metrics = StaticMetrics {
+            unsafe_density: 10,
+            ffi_declarations: 50,
+            ..Default::default()
+        };
+        let scores = vec![
+            file_score_with_metrics("src/ffi_bridge.rs", 40, metrics),
+            file_score("src/pure.rs", 40),
+        ];
+        let mandatory = classify_mandatory_files(&scores);
+        assert!(
+            mandatory.contains(&0),
+            "unsafe+FFI file should be mandatory"
+        );
+        assert!(!mandatory.contains(&1), "pure file should not be mandatory");
+    }
+
+    #[test]
+    fn coverage_floor_truncates_when_exceeds_reviewers() {
+        let scores = vec![
+            file_score("src/main.rs", 90),
+            file_score("src/lib.rs", 80),
+            file_score("crate2/src/main.rs", 75),
+            file_score("crate2/src/lib.rs", 70),
+            file_score("crate3/src/main.rs", 60),
+        ];
+        // 5 mandatory files (all are entry points or >= 70), but only 3 reviewers
+        let (assignments, _) = generate_assignments(&scores, 3, 42);
+        let mandatory_count = assignments.iter().filter(|a| a.mandatory).count();
+        assert_eq!(mandatory_count, 3, "should truncate to reviewer_count");
+        // They should be the top 3 by score
+        let mandatory_files: Vec<&str> = assignments
+            .iter()
+            .filter(|a| a.mandatory)
+            .map(|a| a.starting_file.as_str())
+            .collect();
+        assert!(mandatory_files.contains(&"src/main.rs"));
+        assert!(mandatory_files.contains(&"src/lib.rs"));
+        assert!(mandatory_files.contains(&"crate2/src/main.rs"));
+    }
+
+    #[test]
+    fn lens_distribution_round_robin() {
+        use crate::state::ReviewerLens;
+
+        let scores = vec![
+            file_score("src/a.rs", 90),
+            file_score("src/b.rs", 80),
+            file_score("src/c.rs", 70),
+            file_score("src/d.rs", 60),
+            file_score("src/e.rs", 50),
+            file_score("src/f.rs", 40),
+        ];
+        let (assignments, _) = generate_assignments(&scores, 5, 42);
+        let lenses: Vec<&ReviewerLens> = assignments
+            .iter()
+            .map(|a| a.lens.as_ref().unwrap())
+            .collect();
+
+        // First 5 lenses should cycle through ALL
+        let expected = ReviewerLens::ALL;
+        for (i, lens) in lenses.iter().take(5).enumerate() {
+            assert_eq!(*lens, &expected[i % expected.len()], "lens at position {i}");
+        }
+    }
+
+    #[test]
+    fn reserve_count_values() {
+        assert_eq!(compute_reserve_count(1), 1);
+        assert_eq!(compute_reserve_count(2), 1);
+        assert_eq!(compute_reserve_count(3), 1);
+        assert_eq!(compute_reserve_count(4), 2);
+        assert_eq!(compute_reserve_count(6), 2);
+        assert_eq!(compute_reserve_count(9), 3);
+        assert_eq!(compute_reserve_count(12), 4);
+        assert_eq!(compute_reserve_count(15), 4); // clamped to 4
+    }
+
+    #[test]
+    fn reserve_slots_are_marked() {
+        let scores = vec![
+            file_score("src/a.rs", 90),
+            file_score("src/b.rs", 50),
+            file_score("src/c.rs", 30),
+        ];
+        let (assignments, reserve_count) = generate_assignments(&scores, 3, 42);
+        let actual_reserves = assignments.iter().filter(|a| a.reserve).count();
+        assert_eq!(
+            actual_reserves, reserve_count as usize,
+            "reserve count should match"
+        );
+        let primaries = assignments.iter().filter(|a| !a.reserve).count();
+        assert_eq!(primaries, 3, "primary count should match reviewer_count");
     }
 
     #[test]

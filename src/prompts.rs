@@ -96,16 +96,43 @@ pub fn deep_review(
         None => String::new(),
     };
 
-    let assignment_list = assignments
+    let primary: Vec<&TaskAssignment> = assignments.iter().filter(|a| !a.reserve).collect();
+    let reserves: Vec<&TaskAssignment> = assignments.iter().filter(|a| a.reserve).collect();
+
+    let format_assignment = |a: &TaskAssignment| -> String {
+        let lens_str = a
+            .lens
+            .as_ref()
+            .map(|l| format!(", lens: {} — {}", l.name(), l.description()))
+            .unwrap_or_default();
+        let mandatory_str = if a.mandatory { ", mandatory" } else { "" };
+        format!(
+            "  - Reviewer {}: starting file `{}` (score: {}{}{}){}",
+            a.reviewer_id,
+            a.starting_file,
+            a.scout_score,
+            lens_str,
+            mandatory_str,
+            if a.reserve { " [RESERVE]" } else { "" }
+        )
+    };
+
+    let primary_list = primary
         .iter()
-        .map(|a| {
-            format!(
-                "  - Reviewer {}: starting file `{}` (scout score: {})",
-                a.reviewer_id, a.starting_file, a.scout_score
-            )
-        })
+        .map(|a| format_assignment(a))
         .collect::<Vec<_>>()
         .join("\n");
+
+    let reserve_list = if reserves.is_empty() {
+        String::new()
+    } else {
+        let items = reserves
+            .iter()
+            .map(|a| format_assignment(a))
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("\n\n## Reserve Slots (for adaptive allocation)\n\n{items}")
+    };
 
     format!(
         r#"You are the lead of Phase 3 (Deep Review) of a security review for a Rust
@@ -114,18 +141,18 @@ assignments. Your job is to spawn reviewer teammates and coordinate their work.
 
 ## Pre-computed Task Assignments
 
-{assignment_list}
+{primary_list}{reserve_list}
 
 ## Instructions
 
-For each assignment above, spawn a **reviewer teammate** (not a subagent) using
-the agent team system. Teammates run as independent Claude Code sessions in
-parallel, each with their own full context window.
+For each **primary** assignment above, spawn a **reviewer teammate** (not a
+subagent) using the agent team system. Teammates run as independent Claude Code
+sessions in parallel, each with their own full context window.
 
 Give each reviewer teammate the following spawn prompt (substitute their
-specific N, path, and score values):
+specific N, path, score, lens, and lens_description values):
 
----BEGIN REVIEWER SPAWN PROMPT (substitute N, path, score)---
+---BEGIN REVIEWER SPAWN PROMPT (substitute N, path, score, lens, lens_description)---
 You are reviewer N in a parallel Rust security review.
 
 Your assignment:
@@ -134,6 +161,13 @@ Your assignment:
 - Git worktree: .kuriboh/worktrees/reviewer-N  (work here to avoid conflicts)
 - Findings output: .kuriboh/findings/reviewer-N.json
 - PoC directory: .kuriboh/pocs/reviewer-N/
+
+## Primary Lens
+
+Your primary lens is **<lens>**: <lens_description>
+While you must check ALL six review dimensions, spend ~40% of your effort on
+your primary lens. Investigate deeper, trace more call chains, and attempt PoCs
+first for findings in your lens domain.
 
 ## Context
 
@@ -241,11 +275,31 @@ Files reviewed: <count>."
 Then shut down.
 ---END REVIEWER SPAWN PROMPT---
 
-**Wait for all reviewer teammates to send their completion messages** before
-reporting that Phase 3 is complete.
+## Adaptive Allocation (Reserve Slots)
+
+You have {reserve_count} reserve reviewer slots pre-created with worktrees and
+PoC directories. Use them to strengthen coverage during the review.
+
+**When to spawn a reserve reviewer:**
+- After 2+ primary reviewers have completed, if findings cluster in a module
+  that needs deeper investigation
+- If a CRITICAL or HIGH finding has `repro_status: partial` and needs a
+  dedicated PoC attempt
+- If a high-scoring module cluster has no primary coverage
+
+**How to spawn:** Use the same reviewer spawn prompt template above, substituting
+the reserve slot's N, path, score, lens, and lens_description values.
+
+**For unused reserves:** When all primary reviewers are done and you decide not
+to use a reserve slot, write `[]` to its findings file
+(`.kuriboh/findings/reviewer-N.json`).
+
+**Wait for all primary and any spawned reserve reviewer teammates to send their
+completion messages** before reporting that Phase 3 is complete.
 
 Target codebase: {target}
-Max turns: {max_turns}{guidance}"#
+Max turns: {max_turns}{guidance}"#,
+        reserve_count = reserves.len()
     )
 }
 

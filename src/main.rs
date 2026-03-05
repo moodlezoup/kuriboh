@@ -114,7 +114,8 @@ async fn run_phase(
     execute: for<'a> fn(
         &'a mut State,
         &'a cli::Args,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>,
+    )
+        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>,
 ) -> Result<()> {
     // Check if already done and sentinel still valid.
     if *state.phase_status(phase_name) == PhaseStatus::Done {
@@ -235,8 +236,21 @@ fn run_scouting<'a>(
             .reviewers
             .unwrap_or_else(|| scanner::default_reviewer_count(file_scores.len()));
         state.reviewer_count = reviewer_count;
-        state.task_assignments =
+        let (assignments, reserve_count) =
             scanner::generate_assignments(&file_scores, reviewer_count, state.seed);
+        state.task_assignments = assignments;
+        state.reserve_count = reserve_count;
+
+        let mandatory_count = state
+            .task_assignments
+            .iter()
+            .filter(|a| a.mandatory)
+            .count();
+        info!(
+            reviewer_count,
+            mandatory_count, reserve_count, "Task assignments generated"
+        );
+
         state.save(&args.target)?;
 
         Ok(())
@@ -290,6 +304,17 @@ fn run_deep_review<'a>(
         .await?;
         let cost = events::total_cost_usd(&events);
         state.phase_mut("deep_review").cost_usd = Some(cost);
+
+        // Safety net: write `[]` to any missing reserve findings files.
+        for a in state.task_assignments.iter().filter(|a| a.reserve) {
+            let path = args
+                .target
+                .join(format!(".kuriboh/findings/reviewer-{}.json", a.reviewer_id));
+            if !path.exists() {
+                std::fs::write(&path, "[]")?;
+            }
+        }
+
         Ok(())
     })
 }
@@ -329,6 +354,8 @@ fn print_estimate(args: &cli::Args) {
     let reviewers = args
         .reviewers
         .unwrap_or_else(|| scanner::default_reviewer_count(file_count));
+    let reserves = scanner::compute_reserve_count(reviewers);
+    let total_reviewers = reviewers + reserves;
 
     let cost_exploration = 0.15;
     let cost_scouting = file_count as f64 * 0.01; // cheaper: only 3 LLM metrics
@@ -337,8 +364,8 @@ fn print_estimate(args: &cli::Args) {
     let cost_compilation = 0.30;
     let cost_lead_overhead = 0.50;
 
-    let cost_review = reviewers as f64 * cost_per_reviewer;
-    let cost_appraisal = reviewers as f64 * cost_per_appraiser;
+    let cost_review = total_reviewers as f64 * cost_per_reviewer;
+    let cost_appraisal = total_reviewers as f64 * cost_per_appraiser;
     let total = cost_exploration
         + cost_scouting
         + cost_review
@@ -352,7 +379,7 @@ fn print_estimate(args: &cli::Args) {
     println!("Target:       {}", args.target.display());
     println!("Rust files:   {file_count}");
     println!("Model:        {}", args.model);
-    println!("Reviewers:    {reviewers}");
+    println!("Reviewers:    {reviewers} (+{reserves} reserve)");
     println!("Max turns:    {}", args.max_turns);
     if let Some(budget) = args.max_budget_usd {
         println!("Max budget:   ${budget:.2}");
@@ -362,13 +389,13 @@ fn print_estimate(args: &cli::Args) {
     println!("-----                  ---------");
     println!("1. Exploration         ${cost_exploration:.2}");
     println!("2. Scouting ({file_count} files) ${cost_scouting:.2}");
-    println!("3. Deep Review ({reviewers}x)    ${cost_review:.2}");
-    println!("4. Appraisal ({reviewers}x)      ${cost_appraisal:.2}");
+    println!("3. Deep Review ({reviewers}+{reserves}x)  ${cost_review:.2}");
+    println!("4. Appraisal ({reviewers}+{reserves}x)    ${cost_appraisal:.2}");
     println!("5. Compilation         ${cost_compilation:.2}");
     println!("   Lead overhead       ${cost_lead_overhead:.2}");
     println!("                       ---------");
     println!("   Total               ${total:.2}");
     println!();
-    println!("Note: estimates are approximate. Scouting cost is lower than");
-    println!("before because 7/10 metrics are now computed by Rust (free).");
+    println!("Note: estimates are approximate. Reserve reviewers may not all");
+    println!("be used — the lead spawns them adaptively based on findings.");
 }
