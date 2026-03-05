@@ -5,7 +5,6 @@ mod report;
 mod runner;
 mod scanner;
 mod state;
-mod state;
 
 use std::path::Path;
 
