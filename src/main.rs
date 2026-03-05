@@ -7,10 +7,10 @@ mod runner;
 mod scanner;
 mod state;
 
-use std::path::Path;
-
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use tracing::info;
+
+use state::{PhaseStatus, State};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -23,18 +23,17 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env().add_directive(default_level.parse()?),
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive(default_level.parse()?),
         )
         .init();
 
-    // Validate --target early (before expensive agent work).
     args.target = std::fs::canonicalize(&args.target)
         .map_err(|e| anyhow::anyhow!("--target {}: {e}", args.target.display()))?;
     if !args.target.is_dir() {
         bail!("--target {} is not a directory", args.target.display());
     }
 
-    // Validate --output parent directory exists before committing to a long run.
     if let Some(parent) = args.output.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             bail!(
@@ -55,17 +54,51 @@ async fn main() -> Result<()> {
 
     info!(target = %args.target.display(), "Starting kuriboh security review");
 
-    // 1. Write subagent definitions into the target's .claude/agents/ directory.
+    // Install subagent definitions.
     agents::install(&args.target, &args.agents_config)?;
 
-    // 2. Spawn Claude Code and stream NDJSON events.
-    let event_stream = runner::run(&args).await?;
+    // Load or create pipeline state.
+    let mut state = if args.resume {
+        let s = State::load(&args.target)?;
+        if s.target != args.target {
+            bail!(
+                "--resume target mismatch: state has {}, got {}",
+                s.target.display(),
+                args.target.display()
+            );
+        }
+        info!("Resuming from existing state");
+        s
+    } else {
+        let seed = args.seed.unwrap_or_else(rand::random);
+        State::new(args.target.clone(), seed)
+    };
 
-    // 3. Parse events into a structured report and write it out.
-    let report = report::parse(&event_stream)?;
+    // Save initial state so --resume can find it even if we crash in phase 1.
+    state.save(&args.target)?;
+
+    // === Phase 1: Exploration ===
+    run_phase(&mut state, &args, "exploration", run_exploration).await?;
+
+    // === Phase 2: Scouting ===
+    run_phase(&mut state, &args, "scouting", run_scouting).await?;
+
+    // === Phase 3: Deep Review ===
+    run_phase(&mut state, &args, "deep_review", run_deep_review).await?;
+
+    // === Phase 4+5: Appraisal & Compilation ===
+    run_phase(
+        &mut state,
+        &args,
+        "appraisal_compilation",
+        run_appraisal_compilation,
+    )
+    .await?;
+
+    // === Report Generation (Rust, no Claude) ===
+    let report = report::parse_from_workspace(&args.target)?;
     report::write(&report, &args.output, args.json)?;
 
-    // 4. Clean up intermediate artifacts unless --keep-workspace.
     if !args.keep_workspace {
         agents::cleanup(&args.target)?;
     }
@@ -78,48 +111,238 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Count `.rs` files under `dir`, excluding common non-production paths.
-fn count_rs_files(dir: &Path) -> usize {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return 0,
-    };
-    let mut count = 0;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            let skip = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
-                matches!(n, "target" | "vendor" | ".git" | ".kuriboh" | ".claude")
-            });
-            if !skip {
-                count += count_rs_files(&path);
+/// Run a single phase with sentinel checking and state management.
+async fn run_phase(
+    state: &mut State,
+    args: &cli::Args,
+    phase_name: &str,
+    execute: fn(&mut State, &cli::Args) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>>,
+) -> Result<()> {
+    // Check if already done and sentinel still valid.
+    if *state.phase_status(phase_name) == PhaseStatus::Done {
+        if state::check_sentinel(&args.target, phase_name, state)? {
+            info!(phase = phase_name, "Phase already complete, skipping");
+            return Ok(());
+        }
+        tracing::warn!(
+            phase = phase_name,
+            "Phase marked done but sentinel failed, re-running"
+        );
+    }
+
+    info!(phase = phase_name, "Starting phase");
+    state.phase_mut(phase_name).status = PhaseStatus::Running;
+    state.save(&args.target)?;
+
+    match execute(state, args).await {
+        Ok(()) => {
+            if state::check_sentinel(&args.target, phase_name, state)? {
+                state.phase_mut(phase_name).status = PhaseStatus::Done;
+                state.save(&args.target)?;
+                info!(phase = phase_name, "Phase complete");
+                Ok(())
+            } else {
+                state.phase_mut(phase_name).status = PhaseStatus::Failed;
+                state.phase_mut(phase_name).reason =
+                    Some("sentinel check failed".to_string());
+                state.save(&args.target)?;
+                bail!("Phase {phase_name} completed but sentinel check failed");
             }
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            count += 1;
+        }
+        Err(e) => {
+            state.phase_mut(phase_name).status = PhaseStatus::Failed;
+            state.phase_mut(phase_name).reason = Some(format!("{e:#}"));
+            state.save(&args.target)?;
+            Err(e).with_context(|| format!("Phase {phase_name} failed"))
         }
     }
-    count
 }
 
-/// Compute the dynamic reviewer count: ceil(sqrt(n)) clamped to [3, 12].
-fn default_reviewer_count(file_count: usize) -> u32 {
-    ((file_count as f64).sqrt().ceil() as u32).clamp(3, 12)
+// --- Phase implementations ---
+
+fn run_exploration<'a>(
+    state: &'a mut State,
+    args: &'a cli::Args,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+    Box::pin(async move {
+        let prompt = prompts::exploration(
+            &args.target.display().to_string(),
+            args.prompt.as_deref(),
+        );
+        let events = runner::run_session(
+            args,
+            &runner::SessionOpts {
+                prompt,
+                agent_teams: false,
+            },
+        )
+        .await?;
+        let cost = events::total_cost_usd(&events);
+        state.phase_mut("exploration").cost_usd = Some(cost);
+        Ok(())
+    })
+}
+
+fn run_scouting<'a>(
+    state: &'a mut State,
+    args: &'a cli::Args,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+    Box::pin(async move {
+        // 2a: Enumerate files and compute static metrics.
+        let file_list = scanner::enumerate_files(&args.target, false)?;
+        let filter_tests = file_list.len() > 300;
+        let file_list = if filter_tests {
+            info!(
+                total = file_list.len(),
+                "Over 300 .rs files, filtering test files for scouting"
+            );
+            scanner::enumerate_files(&args.target, true)?
+        } else {
+            file_list
+        };
+
+        let file_strings: Vec<String> =
+            file_list.iter().map(|p| p.display().to_string()).collect();
+        state.files = file_strings.clone();
+
+        let mut static_scores: Vec<(String, scanner::StaticMetrics)> = Vec::new();
+        for file_path in &file_list {
+            let full_path = args.target.join(file_path);
+            let source = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let metrics = scanner::compute_static_metrics(&source);
+            static_scores.push((file_path.display().to_string(), metrics));
+        }
+
+        // 2b: LLM metrics via scout subagents.
+        let prompt = prompts::llm_scouting(&file_strings);
+        let events = runner::run_session(
+            args,
+            &runner::SessionOpts {
+                prompt,
+                agent_teams: false,
+            },
+        )
+        .await?;
+        let cost = events::total_cost_usd(&events);
+        state.phase_mut("scouting").cost_usd = Some(cost);
+
+        // 2c: Merge scores.
+        let llm_scores_path = args.target.join(".kuriboh/llm-scores.json");
+        let llm_scores = scanner::load_llm_scores(&llm_scores_path)
+            .unwrap_or_default();
+
+        let file_scores = scanner::merge_scores(&static_scores, &llm_scores);
+
+        // Write scores.json
+        let scores_json = serde_json::to_string_pretty(&file_scores)?;
+        std::fs::write(args.target.join(".kuriboh/scores.json"), &scores_json)?;
+
+        // Generate task assignments.
+        let reviewer_count = args
+            .reviewers
+            .unwrap_or_else(|| scanner::default_reviewer_count(file_scores.len()));
+        state.reviewer_count = reviewer_count;
+        state.task_assignments =
+            scanner::generate_assignments(&file_scores, reviewer_count, state.seed);
+        state.save(&args.target)?;
+
+        Ok(())
+    })
+}
+
+fn run_deep_review<'a>(
+    state: &'a mut State,
+    args: &'a cli::Args,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+    Box::pin(async move {
+        // Create git worktrees and PoC dirs.
+        for a in &state.task_assignments {
+            let wt_path = args
+                .target
+                .join(format!(".kuriboh/worktrees/reviewer-{}", a.reviewer_id));
+            if !wt_path.exists() {
+                let output = std::process::Command::new("git")
+                    .args(["worktree", "add"])
+                    .arg(&wt_path)
+                    .arg(format!("-b kuriboh-review-{}", a.reviewer_id))
+                    .current_dir(&args.target)
+                    .output()?;
+                if !output.status.success() {
+                    tracing::warn!(
+                        reviewer = a.reviewer_id,
+                        stderr = %String::from_utf8_lossy(&output.stderr),
+                        "Failed to create worktree"
+                    );
+                }
+            }
+            let poc_dir = args
+                .target
+                .join(format!(".kuriboh/pocs/reviewer-{}", a.reviewer_id));
+            std::fs::create_dir_all(&poc_dir)?;
+        }
+
+        let prompt = prompts::deep_review(
+            &state.task_assignments,
+            &args.target.display().to_string(),
+            args.max_turns,
+            args.prompt.as_deref(),
+        );
+        let events = runner::run_session(
+            args,
+            &runner::SessionOpts {
+                prompt,
+                agent_teams: true,
+            },
+        )
+        .await?;
+        let cost = events::total_cost_usd(&events);
+        state.phase_mut("deep_review").cost_usd = Some(cost);
+        Ok(())
+    })
+}
+
+fn run_appraisal_compilation<'a>(
+    state: &'a mut State,
+    args: &'a cli::Args,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
+    Box::pin(async move {
+        let reviewer_ids: Vec<u32> = state
+            .task_assignments
+            .iter()
+            .map(|a| a.reviewer_id)
+            .collect();
+        let prompt = prompts::appraisal_and_compilation(
+            &reviewer_ids,
+            &args.target.display().to_string(),
+            args.max_turns,
+        );
+        let events = runner::run_session(
+            args,
+            &runner::SessionOpts {
+                prompt,
+                agent_teams: false,
+            },
+        )
+        .await?;
+        let cost = events::total_cost_usd(&events);
+        state.phase_mut("appraisal_compilation").cost_usd = Some(cost);
+        Ok(())
+    })
 }
 
 fn print_estimate(args: &cli::Args) {
-    let file_count = count_rs_files(&args.target);
+    let file_list = scanner::enumerate_files(&args.target, false).unwrap_or_default();
+    let file_count = file_list.len();
     let reviewers = args
         .reviewers
-        .unwrap_or_else(|| default_reviewer_count(file_count));
+        .unwrap_or_else(|| scanner::default_reviewer_count(file_count));
 
-    // Empirical cost-per-agent estimates (based on kuriboh self-reviews).
-    // These are rough — actual cost depends on file complexity and model.
-    let cost_exploration = 0.15; // 1 Explore subagent
-    let cost_scouting = file_count as f64 * 0.02; // Haiku per file
-    let cost_per_reviewer = 1.80; // Sonnet DFS review
-    let cost_per_appraiser = 0.60; // Sonnet validation
-    let cost_compilation = 0.30; // Lead synthesis
-    let cost_lead_overhead = 0.50; // Lead orchestration across phases
+    let cost_exploration = 0.15;
+    let cost_scouting = file_count as f64 * 0.01; // cheaper: only 3 LLM metrics
+    let cost_per_reviewer = 1.80;
+    let cost_per_appraiser = 0.60;
+    let cost_compilation = 0.30;
+    let cost_lead_overhead = 0.50;
 
     let cost_review = reviewers as f64 * cost_per_reviewer;
     let cost_appraisal = reviewers as f64 * cost_per_appraiser;
@@ -153,7 +376,6 @@ fn print_estimate(args: &cli::Args) {
     println!("                       ---------");
     println!("   Total               ${total:.2}");
     println!();
-    println!("Note: estimates are approximate, based on empirical data from");
-    println!("small-to-medium codebases. Actual cost depends on file complexity,");
-    println!("model pricing, and how many turns each agent uses.");
+    println!("Note: estimates are approximate. Scouting cost is lower than");
+    println!("before because 7/10 metrics are now computed by Rust (free).");
 }
