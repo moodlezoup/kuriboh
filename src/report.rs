@@ -3,7 +3,6 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::events::{self, ClaudeEvent};
 use crate::state::State;
 
 /// Severity of a single security finding.
@@ -72,23 +71,6 @@ pub struct Report {
     pub total_cost_usd: f64,
     /// The raw synthesized text from the lead agent's final result event.
     pub raw_result: String,
-}
-
-/// Build a `Report` from the event stream produced by a claude run.
-pub fn parse(event_stream: &[ClaudeEvent]) -> Result<Report> {
-    let raw_result = events::final_result(event_stream).unwrap_or("").to_owned();
-
-    // TODO: implement structured Markdown → Finding extraction by parsing
-    // the `### [SEVERITY] <title>` sections in raw_result.
-    Ok(Report {
-        executive_summary: extract_executive_summary(&raw_result),
-        scouting_summary: extract_section(&raw_result, "scouting overview"),
-        review_coverage: extract_section(&raw_result, "review coverage"),
-        findings: vec![],
-        needs_review: vec![],
-        total_cost_usd: events::total_cost_usd(event_stream),
-        raw_result,
-    })
 }
 
 /// Write the report to `path`.
