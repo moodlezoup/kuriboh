@@ -3,6 +3,7 @@ mod cli;
 mod events;
 mod report;
 mod runner;
+mod state;
 
 use std::path::Path;
 
