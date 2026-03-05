@@ -12,6 +12,12 @@ use tracing::info;
 
 use state::{PhaseStatus, State};
 
+/// Async phase function: takes mutable state + args, returns a pinned future.
+type PhaseFn = for<'a> fn(
+    &'a mut State,
+    &'a cli::Args,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = cli::parse();
@@ -111,11 +117,7 @@ async fn run_phase(
     state: &mut State,
     args: &cli::Args,
     phase_name: &str,
-    execute: for<'a> fn(
-        &'a mut State,
-        &'a cli::Args,
-    )
-        -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>,
+    execute: PhaseFn,
 ) -> Result<()> {
     // Check if already done and sentinel still valid.
     if *state.phase_status(phase_name) == PhaseStatus::Done {

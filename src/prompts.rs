@@ -175,17 +175,46 @@ Read these two files first for codebase context:
 - `.kuriboh/exploration.md` — architectural overview from Phase 1
 - `.kuriboh/scores.json` — per-file risk scores from Phase 2
 
-## Review Method: Depth-First Search
+## Review Method: Frontier-Based Search
 
-Starting from your assigned file:
+Maintain a live priority queue at `.kuriboh/frontier/reviewer-N.json`:
 
-1. Read the file thoroughly.
-2. Identify vulnerabilities using all dimensions below.
-3. Follow call chains: for any function/trait/macro that looks insecure, read
-   the callee's source and recurse.
-4. Stop recursing when you reach: standard library or well-audited external
-   crates (unless misused), files you have already reviewed, or files with
-   score < 20 and no suspicious patterns.
+```json
+[{{{{
+  "node": "src/parser.rs:parse_input",
+  "priority": 85,
+  "reason": "Called from unsafe block, handles user input",
+  "source": "call_chain|score_based|taint_propagation|pattern_match",
+  "tainted_sources": ["stdin", "network_socket"],
+  "status": "pending|exploring|done|pruned"
+}}}}]
+```
+
+Workflow:
+1. **Seed**: Read your starting file; add its functions + high-score neighbors
+   (>= 50 in scores.json) to the frontier as `pending`.
+2. **Pop**: Take the highest-priority `pending` item, set it to `exploring`.
+3. **Examine**: Read the code, discover new leads (callees, callers, trait
+   impls), add them to the frontier with computed priority. No duplicates —
+   update priority if higher.
+4. **Record**: Mark current item `done`, write any findings.
+5. **Backtrack**: Compare the next call-chain target's priority vs the top
+   `pending` item in the frontier. Switch to the higher-value target instead
+   of blindly going deeper.
+6. **Prune**: Mark safe items `pruned` with a reason (e.g. "data validated
+   before reaching this node", "wrapper around safe stdlib call").
+7. **Write incrementally**: Update the frontier file after each node, not just
+   at end. The lead reads these files for reserve allocation decisions.
+8. **Stop adding**: stdlib functions, items with score < 20, items already
+   `done`.
+
+Priority heuristic (0-100):
+- Base: file's `weighted_score` from scores.json
+- +20 if called from unsafe context
+- +15 if handles tainted/user-controlled data
+- +10 if in your primary lens domain
+- -10 if already partially covered by starting file analysis
+- Clamp to [0, 100]
 
 ## Review Dimensions
 
@@ -280,15 +309,40 @@ Then shut down.
 You have {reserve_count} reserve reviewer slots pre-created with worktrees and
 PoC directories. Use them to strengthen coverage during the review.
 
+**Frontier-informed reserve decisions:**
+After 2+ primary reviewers have completed, read `.kuriboh/frontier/reviewer-*.json`
+from all reviewers (files are written incrementally, readable while reviewers
+are still running). Analyze the frontiers:
+1. Collect all `pending` items across all reviewer frontiers.
+2. Collect all `done` items to understand current coverage.
+3. Identify high-priority unclaimed nodes (priority >= 70) that appear as
+   `pending` in multiple frontiers — these are high-value unexplored leads.
+4. Find module clusters where multiple pending items share a common path prefix.
+
 **When to spawn a reserve reviewer:**
-- After 2+ primary reviewers have completed, if findings cluster in a module
-  that needs deeper investigation
-- If a CRITICAL or HIGH finding has `repro_status: partial` and needs a
-  dedicated PoC attempt
-- If a high-scoring module cluster has no primary coverage
+- High-priority frontier items pending across multiple reviewers (priority >= 70)
+- A CRITICAL or HIGH finding has `repro_status: partial` and needs a dedicated
+  PoC attempt
+- Findings cluster in a module that needs deeper investigation
+- A high-scoring module cluster has no primary coverage and appears as `pending`
+  in multiple frontiers
 
 **How to spawn:** Use the same reviewer spawn prompt template above, substituting
-the reserve slot's N, path, score, lens, and lens_description values.
+the reserve slot's N, path, score, lens, and lens_description values. Append an
+"Additional Starting Points" section listing the top 5-10 pending items from
+cross-frontier analysis:
+
+```
+## Additional Starting Points (from cross-frontier analysis)
+- `src/parser.rs:parse_input` (priority: 85, reason: "Called from unsafe block",
+  originally queued by: Reviewer 2)
+- `src/net/tls.rs:handshake` (priority: 78, reason: "Tainted data from network",
+  originally queued by: Reviewers 1, 4)
+...
+```
+
+This turns reserves into "cleanup" reviewers that target the most promising
+unexplored leads across all primary reviewers.
 
 **For unused reserves:** When all primary reviewers are done and you decide not
 to use a reserve slot, write `[]` to its findings file

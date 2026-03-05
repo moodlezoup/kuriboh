@@ -159,7 +159,7 @@ pub fn install(target: &Path, config: &Option<PathBuf>) -> Result<()> {
     let kuriboh_dir = target.join(".kuriboh");
     std::fs::create_dir_all(&kuriboh_dir)
         .with_context(|| format!("creating {}", kuriboh_dir.display()))?;
-    for subdir in ["findings", "worktrees", "pocs"] {
+    for subdir in ["findings", "worktrees", "pocs", "frontier"] {
         let sub = kuriboh_dir.join(subdir);
         std::fs::create_dir_all(&sub).with_context(|| format!("creating {}", sub.display()))?;
     }
