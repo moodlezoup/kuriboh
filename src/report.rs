@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::events::{self, ClaudeEvent};
+use crate::state::State;
 
 /// Severity of a single security finding.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -271,6 +272,80 @@ fn extract_executive_summary(raw: &str) -> String {
     } else {
         summary
     }
+}
+
+/// Build a report by reading workspace artifacts directly (no event stream).
+///
+/// This is used when the Rust harness drives each phase individually
+/// and findings are written to `.kuriboh/compiled-findings.json`.
+pub fn parse_from_workspace(target: &Path) -> Result<Report> {
+    let kb = target.join(".kuriboh");
+
+    // Read compiled findings.
+    let compiled_path = kb.join("compiled-findings.json");
+    let (findings, needs_review) = if compiled_path.exists() {
+        let data =
+            std::fs::read_to_string(&compiled_path).context("reading compiled-findings.json")?;
+        let all: Vec<Finding> =
+            serde_json::from_str(&data).context("parsing compiled-findings.json")?;
+        let (nr, confirmed): (Vec<_>, Vec<_>) = all
+            .into_iter()
+            .partition(|f| f.verdict.as_deref() == Some("needs-review"));
+        (confirmed, nr)
+    } else {
+        (vec![], vec![])
+    };
+
+    // Read exploration summary.
+    let exploration = std::fs::read_to_string(kb.join("exploration.md")).ok();
+
+    // Read scores for scouting summary.
+    let scouting_summary =
+        std::fs::read_to_string(kb.join("scores.json"))
+            .ok()
+            .map(|data| {
+                let scores: Vec<serde_json::Value> =
+                    serde_json::from_str(&data).unwrap_or_default();
+                let total = scores.len();
+                let critical = scores
+                    .iter()
+                    .filter(|s| s["weighted_score"].as_u64().unwrap_or(0) >= 70)
+                    .count();
+                let high = scores
+                    .iter()
+                    .filter(|s| {
+                        let v = s["weighted_score"].as_u64().unwrap_or(0);
+                        (50..70).contains(&v)
+                    })
+                    .count();
+                format!("{total} files scored. {critical} critical-tier, {high} high-tier.")
+            });
+
+    // Sum costs from state.json if available.
+    let total_cost = State::load(target)
+        .ok()
+        .map(|s| s.phases.values().filter_map(|p| p.cost_usd).sum::<f64>())
+        .unwrap_or(0.0);
+
+    let executive_summary = if findings.is_empty() && needs_review.is_empty() {
+        "No findings survived appraisal.".to_string()
+    } else {
+        format!(
+            "{} findings confirmed, {} need human review.",
+            findings.len(),
+            needs_review.len()
+        )
+    };
+
+    Ok(Report {
+        executive_summary,
+        scouting_summary,
+        review_coverage: None,
+        findings,
+        needs_review,
+        total_cost_usd: total_cost,
+        raw_result: exploration.unwrap_or_default(),
+    })
 }
 
 /// Skip sections already extracted (Executive Summary, Scouting Overview,
