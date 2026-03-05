@@ -20,7 +20,7 @@ get a bird's-eye view of the codebase. Your exploration should identify:
    usage, notable dependencies.
 4. Build configuration (workspace vs single crate, feature flags).
 
-Write the results to `.kuriboh/exploration.md`:
+Write the results to `{target}/.kuriboh/exploration.md`:
 
 ```markdown
 # Codebase Exploration
@@ -45,7 +45,7 @@ Target codebase: {target}{guidance}"
 }
 
 /// Phase 2b: LLM scouting prompt. Only asks for the 3 LLM metrics.
-pub fn llm_scouting(files: &[String]) -> String {
+pub fn llm_scouting(target: &str, files: &[String]) -> String {
     let file_list = files
         .iter()
         .map(|f| format!("  - {f}"))
@@ -66,7 +66,7 @@ Files to score:
 {file_list}
 
 After ALL scouts have reported, collect their results and write
-`.kuriboh/llm-scores.json` as a JSON array:
+`{target}/.kuriboh/llm-scores.json` as a JSON array:
 
 ```json
 [
@@ -155,12 +155,15 @@ specific N, path, score, lens, and lens_description values):
 ---BEGIN REVIEWER SPAWN PROMPT (substitute N, path, score, lens, lens_description)---
 You are reviewer N in a parallel Rust security review.
 
+Repo root: {target}
+ALL paths below are absolute. Always use them as-is, even if you cd elsewhere.
+
 Your assignment:
 - Starting file: <path>
 - Scout score: <score> (files rated 70+ are critical risk)
-- Git worktree: .kuriboh/worktrees/reviewer-N  (work here to avoid conflicts)
-- Findings output: .kuriboh/findings/reviewer-N.json
-- PoC directory: .kuriboh/pocs/reviewer-N/
+- Git worktree: {target}/.kuriboh/worktrees/reviewer-N  (work here to avoid conflicts)
+- Findings output: {target}/.kuriboh/findings/reviewer-N.json
+- PoC directory: {target}/.kuriboh/pocs/reviewer-N/
 
 ## Primary Lens
 
@@ -172,12 +175,12 @@ first for findings in your lens domain.
 ## Context
 
 Read these two files first for codebase context:
-- `.kuriboh/exploration.md` — architectural overview from Phase 1
-- `.kuriboh/scores.json` — per-file risk scores from Phase 2
+- `{target}/.kuriboh/exploration.md` — architectural overview from Phase 1
+- `{target}/.kuriboh/scores.json` — per-file risk scores from Phase 2
 
 ## Review Method: Frontier-Based Search
 
-Maintain a live priority queue at `.kuriboh/frontier/reviewer-N.json`:
+Maintain a live priority queue at `{target}/.kuriboh/frontier/reviewer-N.json`:
 
 ```json
 [{{{{
@@ -264,13 +267,13 @@ Spawn them with the file path or a specific question as the prompt.
 ## Proof of Concepts
 
 When you find a vulnerability, attempt a PoC in your git worktree:
-- File: `.kuriboh/pocs/reviewer-N/poc-<short-title>.rs` (or `.sh`)
+- File: `{target}/.kuriboh/pocs/reviewer-N/poc-<short-title>.rs` (or `.sh`)
 - If it compiles and demonstrates the issue, set `poc_available: true`
 - If you cannot write a PoC, explain why in the finding description.
 
 ## Output
 
-Write findings to `.kuriboh/findings/reviewer-N.json` as a JSON array.
+Write findings to `{target}/.kuriboh/findings/reviewer-N.json` as a JSON array.
 All fields marked * are **required**:
 
 ```json
@@ -310,7 +313,7 @@ You have {reserve_count} reserve reviewer slots pre-created with worktrees and
 PoC directories. Use them to strengthen coverage during the review.
 
 **Frontier-informed reserve decisions:**
-After 2+ primary reviewers have completed, read `.kuriboh/frontier/reviewer-*.json`
+After 2+ primary reviewers have completed, read `{target}/.kuriboh/frontier/reviewer-*.json`
 from all reviewers (files are written incrementally, readable while reviewers
 are still running). Analyze the frontiers:
 1. Collect all `pending` items across all reviewer frontiers.
@@ -346,7 +349,7 @@ unexplored leads across all primary reviewers.
 
 **For unused reserves:** When all primary reviewers are done and you decide not
 to use a reserve slot, write `[]` to its findings file
-(`.kuriboh/findings/reviewer-N.json`).
+(`{target}/.kuriboh/findings/reviewer-N.json`).
 
 **Wait for all primary and any spawned reserve reviewer teammates to send their
 completion messages** before reporting that Phase 3 is complete.
@@ -362,7 +365,7 @@ pub fn appraisal_and_compilation(reviewer_ids: &[u32], target: &str, max_turns: 
     let reviewer_list = reviewer_ids
         .iter()
         .map(|id| {
-            format!("  - Reviewer {id}: findings at `.kuriboh/findings/reviewer-{id}.json`, worktree at `.kuriboh/worktrees/reviewer-{id}`")
+            format!("  - Reviewer {id}: findings at `{target}/.kuriboh/findings/reviewer-{id}.json`, worktree at `{target}/.kuriboh/worktrees/reviewer-{id}`")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -380,13 +383,13 @@ Reviewers:
 {reviewer_list}
 
 For each reviewer N:
-1. Verify `.kuriboh/findings/reviewer-N.json` exists and is valid JSON.
+1. Verify `{target}/.kuriboh/findings/reviewer-N.json` exists and is valid JSON.
    If the file is missing or empty, skip appraisal for this reviewer.
 2. Spawn the appraiser subagent with this prompt:
    "Appraise the findings from reviewer N.
-   Findings file: .kuriboh/findings/reviewer-N.json
-   Worktree path: .kuriboh/worktrees/reviewer-N
-   Write appraised findings to: .kuriboh/findings/appraised-N.json"
+   Findings file: {target}/.kuriboh/findings/reviewer-N.json
+   Worktree path: {target}/.kuriboh/worktrees/reviewer-N
+   Write appraised findings to: {target}/.kuriboh/findings/appraised-N.json"
 
 **Wait for ALL appraisers to complete** before proceeding to Phase 5.
 
@@ -395,7 +398,7 @@ For each reviewer N:
 Compile all appraised findings into a single deduplicated report.
 
 ### Step 1: Collect findings
-Read all `.kuriboh/findings/appraised-*.json` files. Collect all findings with
+Read all `{target}/.kuriboh/findings/appraised-*.json` files. Collect all findings with
 verdict "confirmed", "adjusted", or "needs-review". Discard "rejected" findings.
 
 ### Step 2: Deduplicate
@@ -410,7 +413,7 @@ Sort findings by severity (CRITICAL > HIGH > MEDIUM > LOW > INFO), then by
 scout_score descending within the same severity level.
 
 ### Step 4: Write compiled report
-Write `.kuriboh/compiled-findings.json` with the deduplicated, sorted findings
+Write `{target}/.kuriboh/compiled-findings.json` with the deduplicated, sorted findings
 as a JSON array using this schema:
 
 ```json

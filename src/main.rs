@@ -197,7 +197,7 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
     }
 
     // 2b: LLM metrics via scout subagents.
-    let prompt = prompts::llm_scouting(&file_strings);
+    let prompt = prompts::llm_scouting(&args.target.display().to_string(), &file_strings);
     let events = runner::run_session(
         args,
         &runner::SessionOpts {
