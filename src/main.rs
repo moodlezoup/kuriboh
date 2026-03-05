@@ -42,10 +42,6 @@ async fn main() -> Result<()> {
         }
     }
 
-    if args.agents_config.is_some() {
-        tracing::warn!("--agents-config is not yet implemented; ignoring");
-    }
-
     if args.estimate {
         print_estimate(&args);
         return Ok(());

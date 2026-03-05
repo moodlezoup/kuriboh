@@ -1,18 +1,17 @@
-/// Subagent: audits all `unsafe` blocks for soundness issues.
-///
-/// Spawned by reviewer teammates (full Claude Code sessions) when they
-/// encounter files with unsafe code, raw pointers, or FFI. Because reviewers
-/// are teammates (not subagents), they CAN spawn subagents like this one.
-pub const UNSAFE_AUDITOR: &str = r#"---
-name: unsafe-auditor
-description: >
-  Audits Rust unsafe blocks. Invoked automatically for any task involving
-  unsafe code, raw pointers, FFI, or memory safety concerns.
-tools: Read, Glob, Grep
-model: sonnet
----
+use super::AgentDef;
 
-You are a Rust memory-safety auditor specializing in `unsafe` code.
+/// All built-in agent definitions.
+pub fn builtin_agents() -> Vec<AgentDef> {
+    vec![
+        AgentDef {
+            name: "unsafe-auditor".into(),
+            description: "Audits Rust unsafe blocks. Invoked automatically for any task involving \
+                          unsafe code, raw pointers, FFI, or memory safety concerns."
+                .into(),
+            tools: "Read, Glob, Grep".into(),
+            model: "sonnet".into(),
+            background: false,
+            prompt: r#"You are a Rust memory-safety auditor specializing in `unsafe` code.
 
 For every `unsafe` block you find:
 1. Identify the invariants the caller must uphold.
@@ -35,26 +34,19 @@ Output your findings in this format:
 - **Recommendation**: how to fix or harden it
 - **Cross-domain**: (optional) note if crypto-reviewer or dep-checker should also look at this
 
-Severity levels: CRITICAL, HIGH, MEDIUM, LOW, INFO
-"#;
-
-/// Subagent: checks Cargo.lock for known-vulnerable dependencies.
-///
-/// Spawned by reviewer teammates when dependency/CVE analysis is needed.
-/// Runs in background because it is I/O-heavy and only needs to summarize
-/// results back to the reviewer.
-pub const DEP_CHECKER: &str = r#"---
-name: dep-checker
-description: >
-  Checks Cargo.toml and Cargo.lock for known-vulnerable, outdated, or
-  supply-chain-risky dependencies. Invoked for any task involving dependencies,
-  Cargo.lock, CVEs, or crate auditing.
-tools: Read, Glob, Grep, Bash
-model: haiku
-background: true
----
-
-You are a Rust dependency security auditor.
+Severity levels: CRITICAL, HIGH, MEDIUM, LOW, INFO"#
+                .into(),
+        },
+        AgentDef {
+            name: "dep-checker".into(),
+            description: "Checks Cargo.toml and Cargo.lock for known-vulnerable, outdated, or \
+                          supply-chain-risky dependencies. Invoked for any task involving \
+                          dependencies, Cargo.lock, CVEs, or crate auditing."
+                .into(),
+            tools: "Read, Glob, Grep, Bash".into(),
+            model: "haiku".into(),
+            background: true,
+            prompt: r#"You are a Rust dependency security auditor.
 
 Your tasks:
 1. Read `Cargo.toml` and `Cargo.lock`.
@@ -65,21 +57,20 @@ Your tasks:
 5. Note any dependencies that overlap with findings from unsafe-auditor or
    crypto-reviewer (e.g. a vulnerable crypto crate).
 
-Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO).
-"#;
-
-/// Subagent: reviews cryptographic usage for correctness and best practices.
-pub const CRYPTO_REVIEWER: &str = r#"---
-name: crypto-reviewer
-description: >
-  Reviews cryptographic code and usage of crypto crates for correctness,
-  nonce reuse, weak algorithms, and misuse of primitives. Invoked for any
-  task involving cryptography, hashing, signing, or random number generation.
-tools: Read, Glob, Grep
-model: sonnet
----
-
-You are a cryptography security reviewer for Rust codebases.
+Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO)."#
+                .into(),
+        },
+        AgentDef {
+            name: "crypto-reviewer".into(),
+            description: "Reviews cryptographic code and usage of crypto crates for correctness, \
+                          nonce reuse, weak algorithms, and misuse of primitives. Invoked for any \
+                          task involving cryptography, hashing, signing, or random number \
+                          generation."
+                .into(),
+            tools: "Read, Glob, Grep".into(),
+            model: "sonnet".into(),
+            background: false,
+            prompt: r#"You are a cryptography security reviewer for Rust codebases.
 
 Check for:
 1. Weak or deprecated algorithms (MD5, SHA-1, DES, RC4, ECB mode, RSA < 2048 bit).
@@ -94,27 +85,19 @@ Check for:
 If you encounter an `unsafe` block within crypto code, flag it for the
 unsafe-auditor as well.
 
-Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO).
-"#;
-
-/// Subagent: per-file LLM metric scorer.
-///
-/// Spawned once per `.rs` file during the scouting phase. Uses Haiku for speed
-/// and cost, runs in the background, and is strictly read-only. Scores only
-/// the 3 metrics that require semantic judgment — the other 7 are computed
-/// by the Rust harness using static analysis.
-pub const SCOUT: &str = r#"---
-name: scout
-description: >
-  Scores a single Rust source file for semantic complexity metrics that
-  require reading the code. Invoked once per .rs file during scouting.
-  Returns a structured JSON score object with 3 metrics.
-tools: Read, Grep
-model: haiku
-background: true
----
-
-You are a Rust code quality scorer. You will be given the path to a single
+Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO)."#
+                .into(),
+        },
+        AgentDef {
+            name: "scout".into(),
+            description: "Scores a single Rust source file for semantic complexity metrics that \
+                          require reading the code. Invoked once per .rs file during scouting. \
+                          Returns a structured JSON score object with 3 metrics."
+                .into(),
+            tools: "Read, Grep".into(),
+            model: "haiku".into(),
+            background: true,
+            prompt: r#"You are a Rust code quality scorer. You will be given the path to a single
 `.rs` file. Read it and compute the following 3 semantic metrics. These metrics
 require understanding the code — simple pattern matching is insufficient.
 
@@ -145,25 +128,19 @@ require understanding the code — simple pattern matching is insufficient.
 
 Respond with ONLY this JSON (no markdown fences, no extra text):
 
-{"file":"<path>","error_handling_risk":0,"macro_density":0,"generic_complexity":0}
-"#;
-
-/// Subagent: validates and appraises findings from a reviewer.
-///
-/// Spawned once per completed reviewer during Phase 4 (Appraisal). Reads the
-/// reviewer's findings JSON, validates each claim, tests PoCs, and adjusts
-/// severity ratings. Cleans up the reviewer's git worktree if no valid bugs.
-pub const APPRAISER: &str = r#"---
-name: appraiser
-description: >
-  Validates security findings from a reviewer. Checks each finding for
-  accuracy, tests PoCs, adjusts severity ratings, and filters false
-  positives. Writes appraised findings JSON.
-tools: Read, Glob, Grep, Bash, Write
-model: sonnet
----
-
-You are a security finding appraiser. Your job is to validate the work of a
+{"file":"<path>","error_handling_risk":0,"macro_density":0,"generic_complexity":0}"#
+                .into(),
+        },
+        AgentDef {
+            name: "appraiser".into(),
+            description: "Validates security findings from a reviewer. Checks each finding for \
+                          accuracy, tests PoCs, adjusts severity ratings, and filters false \
+                          positives. Writes appraised findings JSON."
+                .into(),
+            tools: "Read, Glob, Grep, Bash, Write".into(),
+            model: "sonnet".into(),
+            background: false,
+            prompt: r#"You are a security finding appraiser. Your job is to validate the work of a
 code reviewer and ensure only genuine, accurately-rated findings survive.
 
 ## Your Assignment
@@ -229,5 +206,8 @@ After appraisal:
   `git worktree remove .kuriboh/worktrees/reviewer-N --force`
 - If ANY findings were confirmed or need review, keep the worktree intact.
 
-Report completion with a summary: N confirmed, N adjusted, N rejected, N needs-review.
-"#;
+Report completion with a summary: N confirmed, N adjusted, N rejected, N needs-review."#
+                .into(),
+        },
+    ]
+}

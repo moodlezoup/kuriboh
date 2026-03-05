@@ -18,12 +18,11 @@ pub struct Args {
     #[arg(short, long, value_name = "PATH", default_value = "kuriboh-report.md")]
     pub output: PathBuf,
 
-    /// Override the set of agents to deploy (comma-separated agent names).
-    /// Defaults to: unsafe-auditor,dep-checker,crypto-reviewer
-    #[arg(long, value_delimiter = ',', value_name = "AGENTS")]
-    pub agents: Vec<String>,
-
-    /// Path to an optional agents config file (TOML) for customizing agent prompts
+    /// Path to a TOML config file for customizing agent definitions.
+    ///
+    /// Override built-in agent fields (description, tools, model, prompt) or
+    /// define new custom subagents that reviewers can spawn. See README for
+    /// the config format.
     #[arg(long, value_name = "PATH")]
     pub agents_config: Option<PathBuf>,
 
