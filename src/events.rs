@@ -127,3 +127,105 @@ pub fn total_cost_usd(events: &[ClaudeEvent]) -> f64 {
         })
         .sum()
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_line_blank() {
+        assert!(parse_line("").is_none());
+        assert!(parse_line("   ").is_none());
+        assert!(parse_line("\n").is_none());
+    }
+
+    #[test]
+    fn parse_line_non_json() {
+        assert!(parse_line("hello world").is_none());
+        assert!(parse_line("--- progress 50% ---").is_none());
+        assert!(parse_line("\x1b[32mgreen text\x1b[0m").is_none());
+    }
+
+    #[test]
+    fn parse_line_malformed_json() {
+        assert!(parse_line("{not valid json}").is_none());
+        assert!(parse_line(r#"{"type": "unknown_variant"}"#).is_none());
+    }
+
+    #[test]
+    fn parse_line_system_event() {
+        let line = r#"{"type":"system","subtype":"init","session_id":"abc","model":"claude-sonnet-4-6","tools":[]}"#;
+        let ev = parse_line(line).unwrap();
+        assert!(matches!(ev, ClaudeEvent::System { session_id, .. } if session_id == "abc"));
+    }
+
+    #[test]
+    fn parse_line_result_event() {
+        let line = r#"{"type":"result","subtype":"success","session_id":"abc","is_error":false,"result":"done","total_cost_usd":1.23}"#;
+        let ev = parse_line(line).unwrap();
+        assert!(
+            matches!(ev, ClaudeEvent::Result { total_cost_usd: Some(c), .. } if (c - 1.23).abs() < f64::EPSILON)
+        );
+    }
+
+    #[test]
+    fn parse_line_with_leading_whitespace() {
+        let line = r#"  {"type":"system","subtype":"init","session_id":"s1","tools":[]}"#;
+        assert!(parse_line(line).is_some());
+    }
+
+    #[test]
+    fn total_cost_sums_result_events() {
+        let events = vec![
+            ClaudeEvent::System {
+                subtype: "init".into(),
+                session_id: "s1".into(),
+                model: None,
+                tools: vec![],
+            },
+            ClaudeEvent::Result {
+                subtype: "success".into(),
+                session_id: "s1".into(),
+                is_error: false,
+                result: "done".into(),
+                duration_ms: None,
+                num_turns: None,
+                total_cost_usd: Some(1.50),
+                usage: None,
+            },
+            ClaudeEvent::Result {
+                subtype: "success".into(),
+                session_id: "s2".into(),
+                is_error: false,
+                result: "done".into(),
+                duration_ms: None,
+                num_turns: None,
+                total_cost_usd: Some(0.75),
+                usage: None,
+            },
+        ];
+        let cost = total_cost_usd(&events);
+        assert!((cost - 2.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn total_cost_empty_events() {
+        assert!((total_cost_usd(&[]) - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn total_cost_skips_none_costs() {
+        let events = vec![ClaudeEvent::Result {
+            subtype: "success".into(),
+            session_id: "s1".into(),
+            is_error: false,
+            result: "done".into(),
+            duration_ms: None,
+            num_turns: None,
+            total_cost_usd: None,
+            usage: None,
+        }];
+        assert!((total_cost_usd(&events) - 0.0).abs() < f64::EPSILON);
+    }
+}

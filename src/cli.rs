@@ -35,14 +35,17 @@ pub struct Args {
     #[arg(short, long, value_name = "TEXT")]
     pub prompt: Option<String>,
 
-    /// Claude model to use for the orchestrating agent team lead
+    /// Claude model for non-lead sessions (exploration, scouting, appraisal).
+    ///
+    /// The deep review lead always uses `claude-opus-4-6` regardless of this
+    /// flag. This controls the model used for all other phases.
     #[arg(long, default_value = "claude-sonnet-4-6", value_name = "MODEL")]
     pub model: String,
 
     /// Number of reviewer agents to spawn in Phase 3 (Deep Review).
     ///
-    /// Each reviewer starts from a randomly-selected file (weighted by scout
-    /// score) and performs a depth-first security audit. More reviewers means
+    /// Each reviewer starts from a high-scoring file and performs a
+    /// frontier-based prioritized search with backtracking. More reviewers means
     /// better coverage but higher cost. Default: dynamically calculated as
     /// ceil(sqrt(total_scored_files)), clamped to [3, 12].
     #[arg(long, value_name = "N")]

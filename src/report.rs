@@ -317,3 +317,173 @@ fn skip_extracted_sections(raw: &str) -> String {
 
     lines.join("\n").trim().to_owned()
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skip_extracted_sections_empty_input() {
+        assert_eq!(skip_extracted_sections(""), "");
+    }
+
+    #[test]
+    fn skip_extracted_sections_all_extracted() {
+        let raw = "## Executive Summary\nSome summary.\n## Scouting Overview\nScores here.";
+        assert_eq!(skip_extracted_sections(raw), "");
+    }
+
+    #[test]
+    fn skip_extracted_sections_keeps_non_extracted() {
+        let raw = "\
+## Executive Summary
+Some summary.
+## Findings
+### [Critical] Buffer overflow
+- File: src/foo.rs:42
+## Remediation Roadmap
+Fix the bugs.";
+        let result = skip_extracted_sections(raw);
+        assert!(result.starts_with("## Findings"));
+        assert!(result.contains("Buffer overflow"));
+        assert!(result.contains("## Remediation Roadmap"));
+        assert!(!result.contains("Executive Summary"));
+    }
+
+    #[test]
+    fn skip_extracted_sections_case_insensitive() {
+        let raw = "## EXECUTIVE SUMMARY\nblah\n## Findings\nreal stuff";
+        let result = skip_extracted_sections(raw);
+        assert!(result.starts_with("## Findings"));
+        assert!(!result.contains("EXECUTIVE SUMMARY"));
+    }
+
+    #[test]
+    fn skip_extracted_sections_interleaved() {
+        let raw = "\
+## Findings
+Finding 1.
+## Review Coverage
+Coverage details.
+## Needs Review
+Needs review stuff.";
+        let result = skip_extracted_sections(raw);
+        assert!(result.contains("## Findings"));
+        assert!(result.contains("Finding 1."));
+        assert!(!result.contains("Review Coverage"));
+        assert!(result.contains("## Needs Review"));
+    }
+
+    #[test]
+    fn parse_from_workspace_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb = dir.path().join(".kuriboh");
+        std::fs::create_dir_all(&kb).unwrap();
+
+        let report = parse_from_workspace(dir.path()).unwrap();
+        assert!(report.findings.is_empty());
+        assert!(report.needs_review.is_empty());
+        assert_eq!(report.executive_summary, "No findings survived appraisal.");
+    }
+
+    #[test]
+    fn parse_from_workspace_with_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let kb = dir.path().join(".kuriboh");
+        std::fs::create_dir_all(&kb).unwrap();
+
+        let findings = serde_json::json!([
+            {
+                "severity": "HIGH",
+                "title": "Buffer overflow",
+                "description": "Writes past buffer end",
+                "recommendation": "Add bounds check",
+                "verdict": "confirmed"
+            },
+            {
+                "severity": "MEDIUM",
+                "title": "Unchecked input",
+                "description": "No validation",
+                "recommendation": "Validate",
+                "verdict": "needs-review"
+            }
+        ]);
+        std::fs::write(
+            kb.join("compiled-findings.json"),
+            serde_json::to_string(&findings).unwrap(),
+        )
+        .unwrap();
+
+        let report = parse_from_workspace(dir.path()).unwrap();
+        assert_eq!(report.findings.len(), 1);
+        assert_eq!(report.needs_review.len(), 1);
+        assert_eq!(report.findings[0].title, "Buffer overflow");
+        assert_eq!(report.needs_review[0].title, "Unchecked input");
+    }
+
+    #[test]
+    fn render_markdown_structure() {
+        let report = Report {
+            executive_summary: "Found 1 issue.".into(),
+            scouting_summary: Some("10 files scored.".into()),
+            review_coverage: Some("3 reviewers.".into()),
+            findings: vec![Finding {
+                severity: Severity::High,
+                title: "Test finding".into(),
+                file: Some("src/foo.rs:42".into()),
+                description: "A test vulnerability".into(),
+                recommendation: "Fix it".into(),
+                source_agent: None,
+                scout_score: Some(75),
+                call_chain: vec!["a.rs:fn_a".into(), "b.rs:fn_b".into()],
+                reachability: Some("direct".into()),
+                evidence: Some("src/foo.rs:42: bad code".into()),
+                exploit_sketch: None,
+                repro_status: None,
+                poc_available: false,
+                poc_validated: None,
+                poc_path: None,
+                original_severity: None,
+                verdict: None,
+                appraiser_notes: None,
+                independent_reviewers: None,
+            }],
+            needs_review: vec![],
+            total_cost_usd: 1.5,
+            raw_result: String::new(),
+        };
+
+        let md = render_markdown(&report);
+        assert!(md.contains("# Kuriboh Security Review Report"));
+        assert!(md.contains("## Executive Summary"));
+        assert!(md.contains("Found 1 issue."));
+        assert!(md.contains("## Scouting Overview"));
+        assert!(md.contains("## Review Coverage"));
+        assert!(md.contains("## Findings"));
+        assert!(md.contains("[High] Test finding"));
+        assert!(md.contains("**Scout Score**: 75"));
+        assert!(md.contains("**Call Chain**: a.rs:fn_a -> b.rs:fn_b"));
+        assert!(md.contains("$1.5"));
+    }
+
+    #[test]
+    fn write_json_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("report.json");
+        let report = Report {
+            executive_summary: "No issues.".into(),
+            scouting_summary: None,
+            review_coverage: None,
+            findings: vec![],
+            needs_review: vec![],
+            total_cost_usd: 0.0,
+            raw_result: String::new(),
+        };
+
+        write(&report, &path, true).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["executive_summary"], "No issues.");
+    }
+}

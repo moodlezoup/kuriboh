@@ -72,6 +72,7 @@ main.rs phase loop:
   findings/                # Phase 3-4 (reviewer-N.json, appraised-N.json)
   worktrees/               # Phase 3 (git worktrees per reviewer)
   pocs/                    # Phase 3 (PoC files per reviewer)
+  frontier/                # Phase 3 (reviewer-N.json priority queues)
   compiled-findings.json   # Phase 5 output
 ```
 

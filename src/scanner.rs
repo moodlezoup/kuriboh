@@ -786,4 +786,111 @@ unsafe fn danger() {
         assert_eq!(default_reviewer_count(100), 10);
         assert_eq!(default_reviewer_count(200), 12);
     }
+
+    #[test]
+    fn load_llm_scores_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("llm-scores.json");
+        fs::write(
+            &path,
+            r#"[
+                {"file": "src/main.rs", "error_handling_risk": 30, "macro_density": 10, "generic_complexity": 5},
+                {"file": "src/lib.rs", "error_handling_risk": 70}
+            ]"#,
+        )
+        .unwrap();
+
+        let scores = load_llm_scores(&path).unwrap();
+        assert_eq!(scores.len(), 2);
+
+        let main_score = scores.get("src/main.rs").unwrap();
+        assert_eq!(main_score.error_handling_risk, 30);
+        assert_eq!(main_score.macro_density, 10);
+        assert_eq!(main_score.generic_complexity, 5);
+
+        // Missing fields default to 0
+        let lib_score = scores.get("src/lib.rs").unwrap();
+        assert_eq!(lib_score.error_handling_risk, 70);
+        assert_eq!(lib_score.macro_density, 0);
+        assert_eq!(lib_score.generic_complexity, 0);
+    }
+
+    #[test]
+    fn load_llm_scores_empty_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("llm-scores.json");
+        fs::write(&path, "[]").unwrap();
+
+        let scores = load_llm_scores(&path).unwrap();
+        assert!(scores.is_empty());
+    }
+
+    #[test]
+    fn load_llm_scores_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.json");
+        assert!(load_llm_scores(&path).is_err());
+    }
+
+    #[test]
+    fn merge_scores_with_llm_data() {
+        let static_scores = vec![
+            (
+                "src/a.rs".to_string(),
+                StaticMetrics {
+                    unsafe_density: 60,
+                    raw_pointer_usage: 55,
+                    ..Default::default()
+                },
+            ),
+            ("src/b.rs".to_string(), StaticMetrics::default()),
+        ];
+        let mut llm = HashMap::new();
+        llm.insert(
+            "src/a.rs".to_string(),
+            LlmMetrics {
+                error_handling_risk: 80,
+                macro_density: 20,
+                generic_complexity: 10,
+            },
+        );
+
+        let scores = merge_scores(&static_scores, &llm);
+        assert_eq!(scores.len(), 2);
+
+        // File with LLM data uses actual values
+        assert_eq!(scores[0].file, "src/a.rs");
+        assert_eq!(scores[0].llm_metrics.error_handling_risk, 80);
+        assert!(scores[0]
+            .top_concerns
+            .contains(&"high unsafe density".to_string()));
+        assert!(scores[0]
+            .top_concerns
+            .contains(&"raw pointer usage".to_string()));
+        assert!(scores[0]
+            .top_concerns
+            .contains(&"poor error handling".to_string()));
+
+        // File without LLM data gets defaults of 50
+        assert_eq!(scores[1].file, "src/b.rs");
+        assert_eq!(scores[1].llm_metrics.error_handling_risk, 50);
+        assert_eq!(scores[1].llm_metrics.macro_density, 50);
+        assert_eq!(scores[1].llm_metrics.generic_complexity, 50);
+        assert!(scores[1].top_concerns.is_empty());
+    }
+
+    #[test]
+    fn merge_scores_combo_bonus() {
+        let static_scores = vec![(
+            "src/ffi.rs".to_string(),
+            StaticMetrics {
+                unsafe_density: 50,
+                raw_pointer_usage: 50,
+                ..Default::default()
+            },
+        )];
+        let scores = merge_scores(&static_scores, &HashMap::new());
+        assert_eq!(scores[0].combination_bonus, 10);
+        assert!(scores[0].weighted_score > 0);
+    }
 }
