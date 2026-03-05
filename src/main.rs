@@ -8,6 +8,7 @@ mod scanner;
 mod state;
 
 use anyhow::{bail, Context, Result};
+use rayon::prelude::*;
 use tracing::info;
 
 use state::{PhaseStatus, State};
@@ -188,13 +189,15 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
     let file_strings: Vec<String> = file_list.iter().map(|p| p.display().to_string()).collect();
     state.files.clone_from(&file_strings);
 
-    let mut static_scores: Vec<(String, scanner::StaticMetrics)> = Vec::new();
-    for file_path in &file_list {
-        let full_path = args.target.join(file_path);
-        let source = std::fs::read_to_string(&full_path).unwrap_or_default();
-        let metrics = scanner::compute_static_metrics(&source);
-        static_scores.push((file_path.display().to_string(), metrics));
-    }
+    let static_scores: Vec<(String, scanner::StaticMetrics)> = file_list
+        .par_iter()
+        .map(|file_path| {
+            let full_path = args.target.join(file_path);
+            let source = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let metrics = scanner::compute_static_metrics(&source);
+            (file_path.display().to_string(), metrics)
+        })
+        .collect();
 
     // 2b: LLM metrics via scout subagents.
     let prompt = prompts::llm_scouting(&args.target.display().to_string(), &file_strings);
@@ -246,30 +249,38 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
 }
 
 async fn run_deep_review(state: &mut State, args: &cli::Args) -> Result<()> {
-    // Create git worktrees and PoC dirs.
-    for a in &state.task_assignments {
-        let wt_path = args
-            .target
-            .join(format!(".kuriboh/worktrees/reviewer-{}", a.reviewer_id));
-        if !wt_path.exists() {
-            let output = std::process::Command::new("git")
-                .args(["worktree", "add"])
-                .arg(&wt_path)
-                .arg(format!("-b kuriboh-review-{}", a.reviewer_id))
-                .current_dir(&args.target)
-                .output()?;
-            if !output.status.success() {
-                tracing::warn!(
-                    reviewer = a.reviewer_id,
-                    stderr = %String::from_utf8_lossy(&output.stderr),
-                    "Failed to create worktree"
-                );
+    // Create git worktrees and PoC dirs in parallel.
+    let wt_results: Vec<Result<()>> = state
+        .task_assignments
+        .par_iter()
+        .map(|a| {
+            let wt_path = args
+                .target
+                .join(format!(".kuriboh/worktrees/reviewer-{}", a.reviewer_id));
+            if !wt_path.exists() {
+                let output = std::process::Command::new("git")
+                    .args(["worktree", "add"])
+                    .arg(&wt_path)
+                    .arg(format!("-b kuriboh-review-{}", a.reviewer_id))
+                    .current_dir(&args.target)
+                    .output()?;
+                if !output.status.success() {
+                    tracing::warn!(
+                        reviewer = a.reviewer_id,
+                        stderr = %String::from_utf8_lossy(&output.stderr),
+                        "Failed to create worktree"
+                    );
+                }
             }
-        }
-        let poc_dir = args
-            .target
-            .join(format!(".kuriboh/pocs/reviewer-{}", a.reviewer_id));
-        std::fs::create_dir_all(&poc_dir)?;
+            let poc_dir = args
+                .target
+                .join(format!(".kuriboh/pocs/reviewer-{}", a.reviewer_id));
+            std::fs::create_dir_all(&poc_dir)?;
+            Ok(())
+        })
+        .collect();
+    for result in wt_results {
+        result?;
     }
 
     let prompt = prompts::deep_review(

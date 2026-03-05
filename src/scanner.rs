@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use rand::prelude::*;
 use rand::rngs::SmallRng;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::state::{ReviewerLens, TaskAssignment};
@@ -281,7 +282,7 @@ pub fn merge_scores(
     llm_scores: &HashMap<String, LlmMetrics>,
 ) -> Vec<FileScore> {
     static_scores
-        .iter()
+        .par_iter()
         .map(|(file, static_m)| {
             let llm_m = llm_scores.get(file).cloned().unwrap_or(LlmMetrics {
                 error_handling_risk: 50,
