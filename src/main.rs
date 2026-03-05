@@ -1,6 +1,7 @@
 mod agents;
 mod cli;
 mod events;
+mod prompts;
 mod report;
 mod runner;
 mod scanner;
