@@ -7,9 +7,6 @@ kuriboh is a Rust CLI that wraps Claude Code (`claude` binary) to run automated 
 ## Build and run
 
 ```bash
-# Source cargo if not on PATH (common in Docker sandbox)
-source "$HOME/.cargo/env"
-
 # Build
 cargo build
 

@@ -214,43 +214,23 @@ fn scale_nesting(depth: u32) -> u32 {
     }
 }
 
-/// Weights for each metric (from the scout rubric).
-const WEIGHTS: &[(&str, u32)] = &[
-    ("unsafe_density", 20),
-    ("raw_pointer_usage", 15),
-    ("unwrap_density", 10),
-    ("error_handling_risk", 10),
-    ("ffi_declarations", 10),
-    ("loc", 5),
-    ("max_nesting_depth", 5),
-    ("todo_fixme_hack", 5),
-    ("macro_density", 5),
-    ("generic_complexity", 5),
-];
-
 /// Compute the weighted score from static + LLM metrics.
 pub fn compute_weighted_score(static_m: &StaticMetrics, llm_m: &LlmMetrics) -> (u32, u32) {
-    let metrics: &[(&str, u32)] = &[
-        ("loc", static_m.loc),
-        ("unsafe_density", static_m.unsafe_density),
-        ("unwrap_density", static_m.unwrap_density),
-        ("raw_pointer_usage", static_m.raw_pointer_usage),
-        ("ffi_declarations", static_m.ffi_declarations),
-        ("todo_fixme_hack", static_m.todo_fixme_hack),
-        ("max_nesting_depth", static_m.max_nesting_depth),
-        ("error_handling_risk", llm_m.error_handling_risk),
-        ("macro_density", llm_m.macro_density),
-        ("generic_complexity", llm_m.generic_complexity),
-    ];
-
-    let mut weighted_sum: f64 = 0.0;
-    for (name, weight) in WEIGHTS {
-        let score = metrics
-            .iter()
-            .find(|(n, _)| n == name)
-            .map_or(0, |(_, v)| *v);
-        weighted_sum += f64::from(score) * f64::from(*weight) / 100.0;
-    }
+    let weighted_sum: f64 = [
+        (static_m.unsafe_density, 20),
+        (static_m.raw_pointer_usage, 15),
+        (static_m.unwrap_density, 10),
+        (llm_m.error_handling_risk, 10),
+        (static_m.ffi_declarations, 10),
+        (static_m.loc, 5),
+        (static_m.max_nesting_depth, 5),
+        (static_m.todo_fixme_hack, 5),
+        (llm_m.macro_density, 5),
+        (llm_m.generic_complexity, 5),
+    ]
+    .iter()
+    .map(|(score, weight)| f64::from(*score) * f64::from(*weight) / 100.0)
+    .sum();
 
     let combo_bonus = if static_m.unsafe_density > 0 && static_m.raw_pointer_usage > 0 {
         10
