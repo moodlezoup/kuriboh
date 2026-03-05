@@ -76,7 +76,14 @@ After ALL scouts have reported, collect their results and write
 ```
 
 If a scout returns malformed JSON, use default score of 50 for all 3 metrics
-for that file. Do not let one failed scout block the pipeline."#
+for that file. Do not let one failed scout block the pipeline.
+
+## JSON Validity Gate
+
+After writing ANY JSON file, immediately validate it:
+  `python3 -m json.tool <file> > /dev/null`
+If validation fails, read the file, fix the JSON, rewrite, and re-validate.
+NEVER proceed to the next step with invalid JSON on disk."#
     )
 }
 
@@ -229,6 +236,14 @@ to use a reserve slot, write `[]` to its findings file
 
 **Wait for all primary and any spawned reserve reviewer teammates to send their
 completion messages** before reporting that Phase 3 is complete.
+
+## JSON Validity Gate
+
+After writing ANY JSON file (including `[]` for unused reserves), immediately
+validate it:
+  `python3 -m json.tool <file> > /dev/null`
+If validation fails, read the file, fix the JSON, rewrite, and re-validate.
+NEVER proceed to the next step with invalid JSON on disk.
 
 Target codebase: {target}
 Max turns: {max_turns}{guidance}"#,

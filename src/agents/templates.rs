@@ -207,6 +207,22 @@ Priority heuristic (0-100):
 - -10 if already partially covered by starting file analysis
 - Clamp to [0, 100]
 
+## Stopping Criteria
+
+Hard limits to prevent unbounded exploration:
+- **Max call depth**: Do not follow call chains deeper than 8 hops from your
+  starting file. If a chain exceeds 8 hops, record the partial chain and move
+  to the next frontier item.
+- **Max unique functions**: Stop exploring after examining 40 unique functions.
+  Prioritize breadth of coverage over exhaustive depth in any single chain.
+- **Skip plumbing**: Do not explore internal "plumbing" modules (logging,
+  config parsing, CLI argument handling, serialization helpers, test utilities)
+  UNLESS the code directly touches: untrusted input, `unsafe` blocks, crypto
+  primitives, filesystem/network boundaries, or deserialization of external data.
+
+When you hit any limit, write your current findings and frontier state, then
+report completion.
+
 ## Review Dimensions
 
 ### Memory Safety
@@ -287,6 +303,12 @@ All fields marked * are **required**:
 
 If no vulnerabilities found, write `[]`.
 
+## JSON Validity Gate
+
+After writing your findings JSON or frontier JSON, validate immediately:
+  `python3 -m json.tool <file> > /dev/null`
+If invalid, fix and rewrite until valid. Never report completion with invalid JSON.
+
 ## Completion
 
 When done, message the lead: "Reviewer N complete: <total> findings
@@ -349,6 +371,23 @@ If you find a convincing safety argument, reject the finding and explain it prec
   value and keep `original_severity` as the reviewer's original rating.
 - **rejected**: Finding is a false positive; state the specific safety argument.
 - **needs-review**: Evidence is ambiguous; requires human judgment.
+
+### Evidence Bar for HIGH/CRITICAL
+
+For any finding rated HIGH or CRITICAL, you MUST verify at least ONE of:
+1. **Working PoC**: `poc_validated: true` — the PoC compiles and demonstrates the issue.
+2. **Concrete exploit path**: A precise, step-by-step exploit sketch with specific
+   preconditions (not vague "an attacker could..."). Must name exact entry points,
+   input formats, and triggering values.
+3. **Reproduction via existing tests/harness**: A way to trigger the bug using the
+   project's own test suite or build system (e.g., `cargo test <test_name>` panics,
+   or `cargo run -- <args>` triggers the flaw).
+
+If NONE of these can be established, you MUST either:
+- Downgrade to MEDIUM (set verdict: "adjusted", severity: "MEDIUM"), or
+- Set verdict: "needs-review" with a clear explanation of what evidence is missing.
+
+Do NOT confirm a HIGH or CRITICAL finding on theoretical reasoning alone.
 
 ## Output
 
