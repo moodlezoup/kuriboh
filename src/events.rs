@@ -31,10 +31,7 @@ pub enum ClaudeEvent {
     },
 
     /// Tool results fed back from the environment to the assistant.
-    User {
-        session_id: String,
-        message: Value,
-    },
+    User { session_id: String, message: Value },
 
     /// The final event, emitted after all turns complete (success or error).
     Result {
@@ -110,7 +107,10 @@ pub fn parse_line(line: &str) -> Option<ClaudeEvent> {
     match serde_json::from_str(trimmed) {
         Ok(ev) => Some(ev),
         Err(e) => {
-            tracing::debug!("Skipping malformed JSON event ({e}): {}", &trimmed[..trimmed.len().min(200)]);
+            tracing::debug!(
+                "Skipping malformed JSON event ({e}): {}",
+                &trimmed[..trimmed.len().min(200)]
+            );
             None
         }
     }
@@ -119,7 +119,11 @@ pub fn parse_line(line: &str) -> Option<ClaudeEvent> {
 /// Extract the final synthesized result text from a completed event stream.
 pub fn final_result(events: &[ClaudeEvent]) -> Option<&str> {
     events.iter().rev().find_map(|ev| match ev {
-        ClaudeEvent::Result { result, is_error: false, .. } => Some(result.as_str()),
+        ClaudeEvent::Result {
+            result,
+            is_error: false,
+            ..
+        } => Some(result.as_str()),
         _ => None,
     })
 }

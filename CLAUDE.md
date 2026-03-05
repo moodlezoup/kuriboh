@@ -29,8 +29,10 @@ The project has no tests yet. Verify changes with `cargo build` (must produce 0 
 
 1. **Exploration** -- built-in Explore subagent surveys codebase -> `.kuriboh/exploration.md`
 2. **Scouting** -- scout subagent (Haiku, parallel) per `.rs` file -> `.kuriboh/scores.json`
-3. **Deep Review** -- reviewer agents with git worktrees, weighted-random file assignment, DFS approach
-4. **Appraisal** -- appraiser per reviewer validates findings, tests PoCs, assigns verdicts
+3. **Deep Review** -- reviewer **teammates** (agent team, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`)
+   with git worktrees, weighted-random file assignment, DFS approach. Teammates are full Claude
+   Code sessions and CAN spawn specialist subagents (unsafe-auditor, dep-checker, crypto-reviewer).
+4. **Appraisal** -- appraiser subagent per reviewer validates findings, tests PoCs, assigns verdicts
 5. **Compilation** -- lead deduplicates and produces final report
 
 ### Key modules
@@ -38,7 +40,7 @@ The project has no tests yet. Verify changes with `cargo build` (must produce 0 
 - `runner.rs` -- Spawns Claude Code subprocess, streams stdout/stderr concurrently with `tokio::select!`, builds the orchestration prompt. TUI hook point: replace `Vec<ClaudeEvent>` with a channel sender.
 - `events.rs` -- `ClaudeEvent` enum modeling Claude Code's `--output-format stream-json` NDJSON. Types: System, Assistant, User, Result.
 - `sandbox.rs` -- `SandboxConfig::build_command()` returns `(program, argv)`. Conditionally adds `--dangerously-skip-permissions` based on CLI flag.
-- `agents/templates.rs` -- 6 subagent definitions as `pub const &str` with YAML frontmatter + Markdown prompt. Agents: scout, reviewer, appraiser, unsafe-auditor, dep-checker, crypto-reviewer.
+- `agents/templates.rs` -- 5 subagent definitions as `pub const &str` with YAML frontmatter + Markdown prompt. Agents: scout, appraiser, unsafe-auditor, dep-checker, crypto-reviewer. The reviewer is no longer a subagent definition — its instructions are inlined in the orchestration prompt as the teammate spawn prompt.
 - `agents/mod.rs` -- `BUILTIN_AGENTS` registry, `install()` writes `.claude/agents/*.md` and creates `.kuriboh/{findings,worktrees,pocs}`, `cleanup()` handles git worktree removal then deletes `.kuriboh/`.
 - `report.rs` -- `Report` and `Finding` structs with serde. `Finding` includes call_chain, poc_available/validated/path, verdict, appraiser_notes, independent_reviewers. Renders Markdown or JSON.
 - `cli.rs` -- clap-derived Args. Notable: `--reviewers` (Option<u32>, dynamic default), `--max-turns` (400), `--keep-workspace`, `--dangerously-skip-permissions`, `--verbose`.
@@ -62,7 +64,8 @@ The project has no tests yet. Verify changes with `cargo build` (must produce 0 
 - Use `anyhow::Result` for error handling throughout.
 - Use `tracing` for logging (`info!` for milestones, `debug!` for details, `warn!` for recoverable issues).
 - Subagent templates are embedded as `pub const &str` in `templates.rs`. Each uses YAML frontmatter (`name`, `description`, `tools`, `model`, optional `background: true`).
-- Adding a new subagent: (1) add `pub const` in `templates.rs`, (2) add `AgentDef` entry in `BUILTIN_AGENTS` in `mod.rs`.
+- Adding a new specialist subagent (spawned by reviewer teammates): (1) add `pub const` in `templates.rs`, (2) add `AgentDef` entry in `BUILTIN_AGENTS` in `mod.rs`.
+- Reviewers are agent team **teammates**, not subagents. Their instructions live in the orchestration prompt in `runner.rs::build_prompt()`, not in `templates.rs`.
 - The orchestration prompt uses `{{{{ }}}}` for literal braces in `format!()` strings (double-escaped because it's inside `r#"..."#`).
 - `cleanup()` must `git worktree remove --force` before `rm -rf .kuriboh/`.
 

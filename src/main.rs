@@ -13,18 +13,20 @@ use tracing::info;
 async fn main() -> Result<()> {
     let mut args = cli::parse();
 
-    let default_level = if args.verbose { "kuriboh=debug" } else { "kuriboh=info" };
+    let default_level = if args.verbose {
+        "kuriboh=debug"
+    } else {
+        "kuriboh=info"
+    };
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(default_level.parse()?),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(default_level.parse()?),
         )
         .init();
 
     // Validate --target early (before expensive agent work).
-    args.target = std::fs::canonicalize(&args.target).map_err(|e| {
-        anyhow::anyhow!("--target {}: {e}", args.target.display())
-    })?;
+    args.target = std::fs::canonicalize(&args.target)
+        .map_err(|e| anyhow::anyhow!("--target {}: {e}", args.target.display()))?;
     if !args.target.is_dir() {
         bail!("--target {} is not a directory", args.target.display());
     }
@@ -83,9 +85,9 @@ fn count_rs_files(dir: &Path) -> usize {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let skip = path.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| matches!(n, "target" | "vendor" | ".git" | ".kuriboh" | ".claude"));
+            let skip = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                matches!(n, "target" | "vendor" | ".git" | ".kuriboh" | ".claude")
+            });
             if !skip {
                 count += count_rs_files(&path);
             }
@@ -103,21 +105,27 @@ fn default_reviewer_count(file_count: usize) -> u32 {
 
 fn print_estimate(args: &cli::Args) {
     let file_count = count_rs_files(&args.target);
-    let reviewers = args.reviewers.unwrap_or_else(|| default_reviewer_count(file_count));
+    let reviewers = args
+        .reviewers
+        .unwrap_or_else(|| default_reviewer_count(file_count));
 
     // Empirical cost-per-agent estimates (based on kuriboh self-reviews).
     // These are rough — actual cost depends on file complexity and model.
-    let cost_exploration = 0.15;                           // 1 Explore subagent
-    let cost_scouting = file_count as f64 * 0.02;         // Haiku per file
-    let cost_per_reviewer = 1.80;                          // Sonnet DFS review
-    let cost_per_appraiser = 0.60;                         // Sonnet validation
-    let cost_compilation = 0.30;                           // Lead synthesis
-    let cost_lead_overhead = 0.50;                         // Lead orchestration across phases
+    let cost_exploration = 0.15; // 1 Explore subagent
+    let cost_scouting = file_count as f64 * 0.02; // Haiku per file
+    let cost_per_reviewer = 1.80; // Sonnet DFS review
+    let cost_per_appraiser = 0.60; // Sonnet validation
+    let cost_compilation = 0.30; // Lead synthesis
+    let cost_lead_overhead = 0.50; // Lead orchestration across phases
 
     let cost_review = reviewers as f64 * cost_per_reviewer;
     let cost_appraisal = reviewers as f64 * cost_per_appraiser;
-    let total = cost_exploration + cost_scouting + cost_review + cost_appraisal
-        + cost_compilation + cost_lead_overhead;
+    let total = cost_exploration
+        + cost_scouting
+        + cost_review
+        + cost_appraisal
+        + cost_compilation
+        + cost_lead_overhead;
 
     println!("Kuriboh Cost Estimate");
     println!("=====================");

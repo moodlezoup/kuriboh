@@ -30,10 +30,6 @@ pub const BUILTIN_AGENTS: &[AgentDef] = &[
         content: templates::SCOUT,
     },
     AgentDef {
-        name: "reviewer",
-        content: templates::REVIEWER,
-    },
-    AgentDef {
         name: "appraiser",
         content: templates::APPRAISER,
     },
@@ -58,8 +54,7 @@ pub fn install(target: &Path, config: &Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("creating {}", kuriboh_dir.display()))?;
     for subdir in ["findings", "worktrees", "pocs"] {
         let sub = kuriboh_dir.join(subdir);
-        std::fs::create_dir_all(&sub)
-            .with_context(|| format!("creating {}", sub.display()))?;
+        std::fs::create_dir_all(&sub).with_context(|| format!("creating {}", sub.display()))?;
     }
     tracing::debug!(path = %kuriboh_dir.display(), "Created .kuriboh workspace");
 

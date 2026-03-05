@@ -75,9 +75,7 @@ pub struct Report {
 
 /// Build a `Report` from the event stream produced by a claude run.
 pub fn parse(event_stream: &[ClaudeEvent]) -> Result<Report> {
-    let raw_result = events::final_result(event_stream)
-        .unwrap_or("")
-        .to_owned();
+    let raw_result = events::final_result(event_stream).unwrap_or("").to_owned();
 
     // TODO: implement structured Markdown → Finding extraction by parsing
     // the `### [SEVERITY] <title>` sections in raw_result.
@@ -98,8 +96,7 @@ pub fn parse(event_stream: &[ClaudeEvent]) -> Result<Report> {
 /// → Markdown. The `--json` flag in [`crate::cli::Args`] overrides the output
 /// path extension.
 pub fn write(report: &Report, path: &Path, force_json: bool) -> Result<()> {
-    let is_json =
-        force_json || path.extension().and_then(|e| e.to_str()) == Some("json");
+    let is_json = force_json || path.extension().and_then(|e| e.to_str()) == Some("json");
 
     let content = if is_json {
         serde_json::to_string_pretty(report).context("serializing report to JSON")?
@@ -176,7 +173,10 @@ fn render_finding(out: &mut String, f: &Finding) {
         out.push_str(&format!("- **Scout Score**: {score}\n"));
     }
     if !f.call_chain.is_empty() {
-        out.push_str(&format!("- **Call Chain**: {}\n", f.call_chain.join(" -> ")));
+        out.push_str(&format!(
+            "- **Call Chain**: {}\n",
+            f.call_chain.join(" -> ")
+        ));
     }
     out.push_str(&format!("- **Description**: {}\n", f.description));
     out.push_str(&format!("- **Recommendation**: {}\n", f.recommendation));
@@ -212,7 +212,11 @@ fn extract_section(raw: &str, heading: &str) -> Option<String> {
     let mut lines: Vec<&str> = Vec::new();
 
     for line in raw.lines() {
-        if line.trim_start_matches('#').trim().eq_ignore_ascii_case(heading) {
+        if line
+            .trim_start_matches('#')
+            .trim()
+            .eq_ignore_ascii_case(heading)
+        {
             in_section = true;
             continue;
         }
@@ -225,7 +229,11 @@ fn extract_section(raw: &str, heading: &str) -> Option<String> {
     }
 
     let body = lines.join("\n").trim().to_owned();
-    if body.is_empty() { None } else { Some(body) }
+    if body.is_empty() {
+        None
+    } else {
+        Some(body)
+    }
 }
 
 /// Best-effort extraction of the Executive Summary section from Markdown output.
@@ -235,7 +243,11 @@ fn extract_executive_summary(raw: &str) -> String {
     let mut lines: Vec<&str> = Vec::new();
 
     for line in raw.lines() {
-        if line.trim_start_matches('#').trim().eq_ignore_ascii_case("executive summary") {
+        if line
+            .trim_start_matches('#')
+            .trim()
+            .eq_ignore_ascii_case("executive summary")
+        {
             in_summary = true;
             continue;
         }

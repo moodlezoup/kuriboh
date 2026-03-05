@@ -33,6 +33,9 @@ pub async fn run(args: &Args) -> Result<Vec<ClaudeEvent>> {
         "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),
+        // Run teammate sessions in-process (no tmux/iTerm2 required).
+        "--teammate-mode".to_string(),
+        "in-process".to_string(),
         // Non-interactive print mode.
         "-p".to_string(),
         prompt,
@@ -59,6 +62,8 @@ pub async fn run(args: &Args) -> Result<Vec<ClaudeEvent>> {
         .args(&claude_args)
         // Prevent nested Claude Code session detection from blocking the subprocess.
         .env_remove("CLAUDECODE")
+        // Enable the agent teams feature for Phase 3 reviewer teammates.
+        .env("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -109,7 +114,10 @@ pub async fn run(args: &Args) -> Result<Vec<ClaudeEvent>> {
 
     let status = child.wait().await.context("waiting for claude to exit")?;
     if !status.success() {
-        tracing::warn!(exit_code = status.code().unwrap_or(-1), "claude exited non-zero");
+        tracing::warn!(
+            exit_code = status.code().unwrap_or(-1),
+            "claude exited non-zero"
+        );
     }
 
     if collected.is_empty() {
@@ -140,8 +148,9 @@ fn print_event_text(ev: &ClaudeEvent) {
 /// The review proceeds in five sequential phases:
 /// 1. **Exploration** — bird's-eye survey using built-in Explore subagents
 /// 2. **Scouting** — per-file complexity scoring using scout subagents (Haiku)
-/// 3. **Deep Review** — weighted-random reviewer agents with git worktrees
-/// 4. **Appraisal** — per-reviewer validation of findings, PoC testing
+/// 3. **Deep Review** — reviewer **teammates** (agent team) with git worktrees;
+///    each reviewer can spawn unsafe-auditor/dep-checker/crypto-reviewer subagents
+/// 4. **Appraisal** — per-reviewer validation of findings, PoC testing (subagents)
 /// 5. **Compilation** — deduplication and final report generation
 fn build_prompt(args: &Args) -> String {
     let reviewers_directive = match args.reviewers {
@@ -230,11 +239,14 @@ If a scout returns malformed JSON, log a warning and assign a default score of
 50 for that file. Do not let one failed scout block the pipeline.
 
 ================================================================================
-PHASE 3: DEEP REVIEW
+PHASE 3: DEEP REVIEW (AGENT TEAM)
 ================================================================================
 
-Using the scouting scores from `.kuriboh/scores.json`, create review tasks using
-weighted random sampling, then spawn reviewer agents to execute them.
+Phase 3 uses an **agent team** for parallel deep review. Unlike subagents,
+reviewer **teammates** are independent Claude Code sessions with their own full
+context windows. This lets each reviewer spawn specialist subagents
+(unsafe-auditor, dep-checker, crypto-reviewer) for targeted deep dives without
+hitting the subagent nesting limit.
 
 ### Step 1: Determine reviewer count
 
@@ -260,7 +272,7 @@ The configured reviewer count is: {reviewers}
    ]
    ```
 
-### Step 3: Create git worktrees and spawn reviewers
+### Step 3: Create git worktrees
 
 For each task assignment:
 
@@ -272,22 +284,129 @@ For each task assignment:
    ```bash
    mkdir -p .kuriboh/pocs/reviewer-N
    ```
-3. Spawn the **reviewer** subagent (defined in `.claude/agents/reviewer.md`) with
-   this prompt:
-   ```
-   You are reviewer N. Your starting file is: <path>
-   Scout score for this file: <score>
-   Your git worktree is at: .kuriboh/worktrees/reviewer-N
-   Write findings to: .kuriboh/findings/reviewer-N.json
-   Write any PoCs to: .kuriboh/pocs/reviewer-N/
-   ```
-4. Reviewers run in **parallel** (background subagents).
 
-The specialist subagents (unsafe-auditor, dep-checker, crypto-reviewer) are
-available in `.claude/agents/`. Reviewers may spawn them as nested subagents
-when they encounter files warranting deep specialized analysis.
+### Step 4: Spawn reviewer teammates
 
-**Wait for ALL reviewers to complete** before proceeding to Phase 4.
+Spawn a **reviewer teammate** (not a subagent) for each task assignment using
+the agent team system. Teammates run as independent Claude Code sessions in
+parallel, each with their own full context window.
+
+Give each reviewer teammate the following spawn prompt (substitute their
+specific N, path, and score values):
+
+---BEGIN REVIEWER SPAWN PROMPT (substitute N, path, score)---
+You are reviewer N in a parallel Rust security review.
+
+Your assignment:
+- Starting file: <path>
+- Scout score: <score> (files rated 70+ are critical risk)
+- Git worktree: .kuriboh/worktrees/reviewer-N  (work here to avoid conflicts)
+- Findings output: .kuriboh/findings/reviewer-N.json
+- PoC directory: .kuriboh/pocs/reviewer-N/
+
+## Context
+
+Read these two files first for codebase context:
+- `.kuriboh/exploration.md` — architectural overview from Phase 1
+- `.kuriboh/scores.json` — per-file risk scores from Phase 2
+
+## Review Method: Depth-First Search
+
+Starting from your assigned file:
+
+1. Read the file thoroughly.
+2. Identify vulnerabilities using all dimensions below.
+3. Follow call chains: for any function/trait/macro that looks insecure, read
+   the callee's source and recurse.
+4. Stop recursing when you reach: standard library or well-audited external
+   crates (unless misused), files you have already reviewed, or files with
+   score < 20 and no suspicious patterns.
+
+## Review Dimensions
+
+### Memory Safety
+- `unsafe` blocks: are invariants upheld? Could the block be made safe?
+- Raw pointer arithmetic: overflow, alignment, provenance
+- Use-after-free, double-free, aliasing violations
+- Unsound `Send`/`Sync` impls
+
+### Error Handling
+- `unwrap()`/`expect()` on user-controlled or network-sourced data
+- Swallowed errors (empty catch, `let _ = result`)
+- Panic paths in library code
+
+### Cryptography
+- Weak algorithms (MD5, SHA-1, DES, RC4, ECB)
+- Nonce/IV reuse, predictable RNG for secrets
+- Missing authentication, incorrect key derivation
+- Side-channel risks (non-constant-time secret comparisons)
+
+### Input Validation & Injection
+- SQL/command injection via string formatting
+- Path traversal, symlink following
+- Integer overflow leading to buffer miscalculation
+- Deserialization of untrusted input without bounds
+
+### Dependencies
+- Known CVEs in transitively-included crates
+- Unnecessary `unsafe` feature flags enabled
+- Dependency confusion / typosquat risks
+
+### Concurrency
+- Data races (shared mutable state without synchronization)
+- Deadlock potential (lock ordering violations)
+- TOCTOU race conditions in file/network operations
+
+## Specialist Subagents
+
+You are a full Claude Code session and CAN spawn subagents for targeted deep
+dives. Use these when you encounter code warranting specialized analysis:
+- **unsafe-auditor**: files with `unsafe` blocks, raw pointers, or FFI
+- **dep-checker**: Cargo.toml/Cargo.lock CVE and supply-chain analysis
+- **crypto-reviewer**: cryptographic code, hashing, signing, or RNG usage
+
+Spawn them with the file path or a specific question as the prompt.
+
+## Proof of Concepts
+
+When you find a vulnerability, attempt a PoC in your git worktree:
+- File: `.kuriboh/pocs/reviewer-N/poc-<short-title>.rs` (or `.sh`)
+- If it compiles and demonstrates the issue, set `poc_available: true`
+- If you cannot write a PoC, explain why in the finding description.
+
+## Output
+
+Write findings to `.kuriboh/findings/reviewer-N.json` as a JSON array:
+
+```json
+[
+  {{{{
+    "severity": "CRITICAL|HIGH|MEDIUM|LOW|INFO",
+    "title": "Short descriptive title",
+    "file": "path/to/file.rs:line",
+    "description": "What the vulnerability is and why it is dangerous",
+    "recommendation": "How to fix or mitigate",
+    "call_chain": ["file_a.rs:fn_x", "file_b.rs:fn_y"],
+    "poc_available": false,
+    "poc_path": null,
+    "scout_score": 72,
+    "files_reviewed": ["src/foo.rs", "src/bar.rs"]
+  }}}}
+]
+```
+
+If no vulnerabilities found, write `[]`.
+
+## Completion
+
+When done, message the lead: "Reviewer N complete: <total> findings
+(<critical> critical, <high> high, <medium> medium, <low> low, <info> info).
+Files reviewed: <count>."
+Then shut down.
+---END REVIEWER SPAWN PROMPT---
+
+**Wait for all reviewer teammates to send their completion messages** before
+proceeding to Phase 4.
 
 ================================================================================
 PHASE 4: APPRAISAL
