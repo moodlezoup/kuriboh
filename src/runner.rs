@@ -72,8 +72,8 @@ pub async fn run_session(args: &Args, opts: &SessionOpts) -> Result<Vec<ClaudeEv
         .spawn()
         .with_context(|| format!("failed to spawn `{program}` — is it installed and on PATH?"))?;
 
-    let stdout = child.stdout.take().expect("stdout is piped");
-    let stderr = child.stderr.take().expect("stderr is piped");
+    let stdout = child.stdout.take().context("stdout not piped")?;
+    let stderr = child.stderr.take().context("stderr not piped")?;
 
     let mut stdout_lines = BufReader::new(stdout).lines();
     let mut stderr_lines = BufReader::new(stderr).lines();

@@ -9,7 +9,7 @@ pub fn exploration(target: &str, user_guidance: Option<&str>) -> String {
         None => String::new(),
     };
     format!(
-        r#"You are performing Phase 1 (Exploration) of a security review for a Rust codebase.
+        r"You are performing Phase 1 (Exploration) of a security review for a Rust codebase.
 
 Use the built-in **Explore** subagent (Claude Code's fast read-only agent) to
 get a bird's-eye view of the codebase. Your exploration should identify:
@@ -40,7 +40,7 @@ Write the results to `.kuriboh/exploration.md`:
 <anything that stood out during exploration>
 ```
 
-Target codebase: {target}{guidance}"#
+Target codebase: {target}{guidance}"
     )
 }
 

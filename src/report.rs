@@ -264,10 +264,9 @@ pub fn parse_from_workspace(target: &Path) -> Result<Report> {
         });
 
     // Sum costs from state.json if available.
-    let total_cost = State::load(target)
-        .ok()
-        .map(|s| s.phases.values().filter_map(|p| p.cost_usd).sum::<f64>())
-        .unwrap_or(0.0);
+    let total_cost = State::load(target).ok().map_or(0.0, |s| {
+        s.phases.values().filter_map(|p| p.cost_usd).sum::<f64>()
+    });
 
     let executive_summary = if findings.is_empty() && needs_review.is_empty() {
         "No findings survived appraisal.".to_string()

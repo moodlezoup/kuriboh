@@ -201,7 +201,7 @@ fn run_scouting<'a>(
         };
 
         let file_strings: Vec<String> = file_list.iter().map(|p| p.display().to_string()).collect();
-        state.files = file_strings.clone();
+        state.files.clone_from(&file_strings);
 
         let mut static_scores: Vec<(String, scanner::StaticMetrics)> = Vec::new();
         for file_path in &file_list {
@@ -354,6 +354,7 @@ fn run_appraisal_compilation<'a>(
     })
 }
 
+#[expect(clippy::print_stdout)]
 fn print_estimate(args: &cli::Args) {
     let file_list = scanner::enumerate_files(&args.target, false).unwrap_or_default();
     let file_count = file_list.len();
@@ -370,8 +371,8 @@ fn print_estimate(args: &cli::Args) {
     let cost_compilation = 0.30;
     let cost_lead_overhead = 0.50;
 
-    let cost_review = total_reviewers as f64 * cost_per_reviewer;
-    let cost_appraisal = total_reviewers as f64 * cost_per_appraiser;
+    let cost_review = f64::from(total_reviewers) * cost_per_reviewer;
+    let cost_appraisal = f64::from(total_reviewers) * cost_per_appraiser;
     let total = cost_exploration
         + cost_scouting
         + cost_review

@@ -248,9 +248,8 @@ pub fn compute_weighted_score(static_m: &StaticMetrics, llm_m: &LlmMetrics) -> (
         let score = metrics
             .iter()
             .find(|(n, _)| n == name)
-            .map(|(_, v)| *v)
-            .unwrap_or(0);
-        weighted_sum += score as f64 * *weight as f64 / 100.0;
+            .map_or(0, |(_, v)| *v);
+        weighted_sum += f64::from(score) * f64::from(*weight) / 100.0;
     }
 
     let combo_bonus = if static_m.unsafe_density > 0 && static_m.raw_pointer_usage > 0 {
@@ -381,7 +380,7 @@ fn weighted_select(
             if exclude.contains(&i) {
                 0.0
             } else {
-                s.weighted_score.max(1) as f64
+                f64::from(s.weighted_score.max(1))
             }
         })
         .collect();
@@ -505,7 +504,9 @@ pub fn default_reviewer_count(file_count: usize) -> u32 {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
+    #[expect(clippy::wildcard_imports)]
     use super::*;
     use std::fs;
 

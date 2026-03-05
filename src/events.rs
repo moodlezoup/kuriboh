@@ -85,6 +85,7 @@ pub enum ContentBlock {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[expect(clippy::struct_field_names)]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,

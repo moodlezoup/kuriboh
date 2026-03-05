@@ -14,7 +14,7 @@ pub fn builtin_agents() -> Vec<AgentDef> {
             background: false,
             max_turns: Some(10),
             permission_mode: None,
-            prompt: r#"You are a Rust memory-safety auditor specializing in `unsafe` code.
+            prompt: r"You are a Rust memory-safety auditor specializing in `unsafe` code.
 
 For every `unsafe` block you find:
 1. Identify the invariants the caller must uphold.
@@ -37,7 +37,7 @@ Output your findings in this format:
 - **Recommendation**: how to fix or harden it
 - **Cross-domain**: (optional) note if crypto-reviewer or dep-checker should also look at this
 
-Severity levels: CRITICAL, HIGH, MEDIUM, LOW, INFO"#
+Severity levels: CRITICAL, HIGH, MEDIUM, LOW, INFO"
                 .into(),
         },
         AgentDef {
@@ -52,7 +52,7 @@ Severity levels: CRITICAL, HIGH, MEDIUM, LOW, INFO"#
             background: true,
             max_turns: Some(10),
             permission_mode: Some("dontAsk".into()),
-            prompt: r#"You are a Rust dependency security auditor.
+            prompt: r"You are a Rust dependency security auditor.
 
 You run in background mode. Do NOT ask clarifying questions — make your best
 judgment with the information available. If a tool is unavailable, skip that
@@ -67,7 +67,7 @@ Your tasks:
 5. Note any dependencies that overlap with findings from unsafe-auditor or
    crypto-reviewer (e.g. a vulnerable crypto crate).
 
-Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO)."#
+Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO)."
                 .into(),
         },
         AgentDef {
@@ -83,7 +83,7 @@ Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO).
             background: false,
             max_turns: Some(10),
             permission_mode: None,
-            prompt: r#"You are a cryptography security reviewer for Rust codebases.
+            prompt: r"You are a cryptography security reviewer for Rust codebases.
 
 Check for:
 1. Weak or deprecated algorithms (MD5, SHA-1, DES, RC4, ECB mode, RSA < 2048 bit).
@@ -98,7 +98,7 @@ Check for:
 If you encounter an `unsafe` block within crypto code, flag it for the
 unsafe-auditor as well.
 
-Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO)."#
+Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO)."
                 .into(),
         },
         AgentDef {

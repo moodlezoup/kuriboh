@@ -156,7 +156,7 @@ impl State {
 
     pub fn save(&self, target: &Path) -> Result<()> {
         let path = Self::path(target);
-        let dir = path.parent().expect(".kuriboh dir");
+        let dir = path.parent().context("state path has no parent")?;
         std::fs::create_dir_all(dir)?;
         let tmp = dir.join("state.json.tmp");
         let data = serde_json::to_string_pretty(self).context("serializing state")?;
@@ -166,6 +166,7 @@ impl State {
         Ok(())
     }
 
+    #[expect(clippy::expect_used)]
     pub fn phase_mut(&mut self, name: &str) -> &mut PhaseState {
         self.phases.get_mut(name).expect("unknown phase name")
     }
@@ -233,7 +234,9 @@ pub fn check_sentinel(target: &Path, phase: &str, state: &State) -> Result<bool>
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
+    #[expect(clippy::wildcard_imports)]
     use super::*;
 
     #[test]

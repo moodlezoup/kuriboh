@@ -252,7 +252,9 @@ pub fn cleanup(target: &Path) -> Result<()> {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used)]
 mod tests {
+    #[expect(clippy::wildcard_imports)]
     use super::*;
 
     #[test]
