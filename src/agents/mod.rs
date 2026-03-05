@@ -13,8 +13,14 @@ pub struct AgentDef {
     pub name: String,
     pub description: String,
     pub tools: String,
+    /// Tools to explicitly deny (defense-in-depth, removed from inherited set).
+    pub disallowed_tools: Option<String>,
     pub model: String,
     pub background: bool,
+    /// Maximum agentic turns before the subagent stops.
+    pub max_turns: Option<u32>,
+    /// Permission mode: "default", "acceptEdits", "dontAsk", "bypassPermissions", "plan".
+    pub permission_mode: Option<String>,
     pub prompt: String,
 }
 
@@ -25,9 +31,18 @@ impl AgentDef {
         out.push_str(&format!("name: {}\n", self.name));
         out.push_str(&format!("description: >\n  {}\n", self.description));
         out.push_str(&format!("tools: {}\n", self.tools));
+        if let Some(dt) = &self.disallowed_tools {
+            out.push_str(&format!("disallowedTools: {dt}\n"));
+        }
         out.push_str(&format!("model: {}\n", self.model));
         if self.background {
             out.push_str("background: true\n");
+        }
+        if let Some(mt) = self.max_turns {
+            out.push_str(&format!("maxTurns: {mt}\n"));
+        }
+        if let Some(pm) = &self.permission_mode {
+            out.push_str(&format!("permissionMode: {pm}\n"));
         }
         out.push_str("---\n\n");
         out.push_str(&self.prompt);
@@ -43,8 +58,11 @@ impl AgentDef {
 struct AgentOverride {
     description: Option<String>,
     tools: Option<String>,
+    disallowed_tools: Option<String>,
     model: Option<String>,
     background: Option<bool>,
+    max_turns: Option<u32>,
+    permission_mode: Option<String>,
     prompt: Option<String>,
 }
 
@@ -76,11 +94,20 @@ fn apply_config(agents: &mut Vec<AgentDef>, config: AgentsConfig) -> Result<()> 
             if let Some(tools) = overrides.tools {
                 agent.tools = tools;
             }
+            if overrides.disallowed_tools.is_some() {
+                agent.disallowed_tools = overrides.disallowed_tools;
+            }
             if let Some(model) = overrides.model {
                 agent.model = model;
             }
             if let Some(bg) = overrides.background {
                 agent.background = bg;
+            }
+            if overrides.max_turns.is_some() {
+                agent.max_turns = overrides.max_turns;
+            }
+            if overrides.permission_mode.is_some() {
+                agent.permission_mode = overrides.permission_mode;
             }
             if let Some(prompt) = overrides.prompt {
                 agent.prompt = prompt;
@@ -102,8 +129,11 @@ fn apply_config(agents: &mut Vec<AgentDef>, config: AgentsConfig) -> Result<()> 
                 name,
                 description: desc,
                 tools: overrides.tools.unwrap_or_else(|| "Read, Glob, Grep".into()),
+                disallowed_tools: overrides.disallowed_tools,
                 model: overrides.model.unwrap_or_else(|| "sonnet".into()),
                 background: overrides.background.unwrap_or(false),
+                max_turns: overrides.max_turns,
+                permission_mode: overrides.permission_mode,
                 prompt,
             });
         }

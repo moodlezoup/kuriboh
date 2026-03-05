@@ -9,8 +9,11 @@ pub fn builtin_agents() -> Vec<AgentDef> {
                           unsafe code, raw pointers, FFI, or memory safety concerns."
                 .into(),
             tools: "Read, Glob, Grep".into(),
+            disallowed_tools: Some("Edit, Write, Bash, NotebookEdit".into()),
             model: "sonnet".into(),
             background: false,
+            max_turns: Some(10),
+            permission_mode: None,
             prompt: r#"You are a Rust memory-safety auditor specializing in `unsafe` code.
 
 For every `unsafe` block you find:
@@ -44,9 +47,16 @@ Severity levels: CRITICAL, HIGH, MEDIUM, LOW, INFO"#
                           dependencies, Cargo.lock, CVEs, or crate auditing."
                 .into(),
             tools: "Read, Glob, Grep, Bash".into(),
+            disallowed_tools: Some("Edit, Write, NotebookEdit".into()),
             model: "haiku".into(),
             background: true,
+            max_turns: Some(10),
+            permission_mode: Some("dontAsk".into()),
             prompt: r#"You are a Rust dependency security auditor.
+
+You run in background mode. Do NOT ask clarifying questions — make your best
+judgment with the information available. If a tool is unavailable, skip that
+step and note it in your output.
 
 Your tasks:
 1. Read `Cargo.toml` and `Cargo.lock`.
@@ -68,8 +78,11 @@ Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO).
                           generation."
                 .into(),
             tools: "Read, Glob, Grep".into(),
+            disallowed_tools: Some("Edit, Write, Bash, NotebookEdit".into()),
             model: "sonnet".into(),
             background: false,
+            max_turns: Some(10),
+            permission_mode: None,
             prompt: r#"You are a cryptography security reviewer for Rust codebases.
 
 Check for:
@@ -95,11 +108,17 @@ Output your findings using the same format as unsafe-auditor (CRITICAL -> INFO).
                           Returns a structured JSON score object with 3 metrics."
                 .into(),
             tools: "Read, Grep".into(),
+            disallowed_tools: Some("Edit, Write, Bash, NotebookEdit".into()),
             model: "haiku".into(),
             background: true,
-            prompt: r#"You are a Rust code quality scorer. You will be given the path to a single
-`.rs` file. Read it and compute the following 3 semantic metrics. These metrics
-require understanding the code — simple pattern matching is insufficient.
+            max_turns: Some(3),
+            permission_mode: Some("dontAsk".into()),
+            prompt: r#"You are a Rust code quality scorer. You run in background mode — do NOT ask
+clarifying questions. Read the file and output JSON only.
+
+You will be given the path to a single `.rs` file. Read it and compute the
+following 3 semantic metrics. These metrics require understanding the code —
+simple pattern matching is insufficient.
 
 ## Metrics (each scored 0-100)
 
@@ -138,8 +157,11 @@ Respond with ONLY this JSON (no markdown fences, no extra text):
                           positives. Writes appraised findings JSON."
                 .into(),
             tools: "Read, Glob, Grep, Bash, Write".into(),
+            disallowed_tools: Some("Edit, NotebookEdit".into()),
             model: "sonnet".into(),
             background: false,
+            max_turns: Some(20),
+            permission_mode: None,
             prompt: r#"You are a security finding appraiser. Your job is to validate the work of a
 code reviewer and ensure only genuine, accurately-rated findings survive.
 
