@@ -33,6 +33,18 @@ pub struct Finding {
     /// The call chain from entry point to vulnerability site.
     #[serde(default)]
     pub call_chain: Vec<String>,
+    /// How attacker-controlled input reaches the vulnerable sink.
+    #[serde(default)]
+    pub reachability: Option<String>,
+    /// Exact file:line + short code snippet as evidence (obtained via rg -n or Read).
+    #[serde(default)]
+    pub evidence: Option<String>,
+    /// Minimal exploit conditions — not just "might be exploitable".
+    #[serde(default)]
+    pub exploit_sketch: Option<String>,
+    /// Reproduction status: not_tried | partial | working | not_reproducible
+    #[serde(default)]
+    pub repro_status: Option<String>,
     /// Whether a proof-of-concept was provided by the reviewer.
     #[serde(default)]
     pub poc_available: bool,
@@ -42,6 +54,9 @@ pub struct Finding {
     /// Path to the PoC file, if any.
     #[serde(default)]
     pub poc_path: Option<String>,
+    /// Original severity before any appraiser adjustment.
+    #[serde(default)]
+    pub original_severity: Option<Severity>,
     /// Appraisal verdict: "confirmed", "adjusted", "rejected", or "needs-review".
     #[serde(default)]
     pub verdict: Option<String>,
@@ -162,6 +177,18 @@ fn render_finding(out: &mut String, f: &Finding) {
         ));
     }
     out.push_str(&format!("- **Description**: {}\n", f.description));
+    if let Some(r) = &f.reachability {
+        out.push_str(&format!("- **Reachability**: {r}\n"));
+    }
+    if let Some(e) = &f.evidence {
+        out.push_str(&format!("- **Evidence**: {e}\n"));
+    }
+    if let Some(s) = &f.exploit_sketch {
+        out.push_str(&format!("- **Exploit Sketch**: {s}\n"));
+    }
+    if let Some(r) = &f.repro_status {
+        out.push_str(&format!("- **Repro Status**: {r}\n"));
+    }
     out.push_str(&format!("- **Recommendation**: {}\n", f.recommendation));
     if f.poc_available {
         let status = match f.poc_validated {
@@ -174,6 +201,11 @@ fn render_finding(out: &mut String, f: &Finding) {
             out.push_str(&format!(" (`{path}`)"));
         }
         out.push('\n');
+    }
+    if f.verdict.as_deref() == Some("adjusted") {
+        if let Some(orig) = &f.original_severity {
+            out.push_str(&format!("- **Original Severity**: {orig:?}\n"));
+        }
     }
     if let Some(n) = f.independent_reviewers {
         if n > 1 {

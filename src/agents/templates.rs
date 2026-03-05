@@ -154,25 +154,34 @@ You will be given:
 
 For EACH finding in the reviewer's output:
 
-### Step 1: Verify the Claim
-- Read the cited file and line number. Does the code actually do what the finding claims?
-- Follow the call chain provided. Is it accurate?
-- Check if the vulnerability is reachable from a public API or entry point.
-- Check for mitigations the reviewer may have missed (e.g. bounds checks elsewhere,
-  type system guarantees, cfg-gated code).
+### Step 1: Falsify First
+Your primary goal is to **find a reason the finding is wrong** before accepting it.
+Ask: "What would make this safe?"
+- Is there a bounds check, type-system guarantee, or cfg-gate the reviewer missed?
+- Is the "attacker-controlled" input actually constrained by an earlier validation step?
+- Does the call chain hold? Read each hop in `call_chain` and verify it is accurate.
+- Is the sink actually reachable from a public API or external entry point?
+If you find a convincing safety argument, reject the finding and explain it precisely.
 
-### Step 2: Test PoCs
+### Step 2: Verify Evidence
+- Read the exact `file:line` cited in `evidence`. Does the code match the claim?
+- Verify `reachability`: trace the data flow yourself; confirm or refute the path.
+- Check `exploit_sketch`: are the stated conditions actually sufficient to trigger the bug?
+
+### Step 3: Test PoCs
 - If `poc_available` is true, navigate to the worktree and try to compile/run the PoC:
   - `cd <worktree_path> && cargo build` or `rustc <poc_path>`
   - If it compiles and demonstrates the issue: set `poc_validated: true`
   - If it fails: set `poc_validated: false` and explain why
 - If no PoC was provided for a HIGH or CRITICAL finding, attempt to write one yourself.
+  Update `repro_status` based on your attempt.
 
-### Step 3: Determine Verdict
-- **confirmed**: The vulnerability is real and the severity is accurate.
-- **adjusted**: The vulnerability is real but the severity was wrong (provide new severity).
-- **rejected**: The finding is a false positive (explain why).
-- **needs-review**: Unclear whether the finding is valid; requires human judgment.
+### Step 4: Determine Verdict
+- **confirmed**: Vulnerability is real, severity is accurate, falsification failed.
+- **adjusted**: Vulnerability is real but severity was wrong; set `severity` to corrected
+  value and keep `original_severity` as the reviewer's original rating.
+- **rejected**: Finding is a false positive; state the specific safety argument.
+- **needs-review**: Evidence is ambiguous; requires human judgment.
 
 ## Output
 
@@ -186,6 +195,10 @@ Write appraised findings to your assigned output path as a JSON array:
     "title": "Short descriptive title",
     "file": "path/to/file.rs:line",
     "description": "What the vulnerability is and why it is dangerous",
+    "reachability": "How attacker input reaches the sink",
+    "evidence": "file:line + snippet",
+    "exploit_sketch": "Minimal exploit conditions",
+    "repro_status": "not_tried|partial|working|not_reproducible",
     "recommendation": "How to fix or mitigate",
     "call_chain": ["file_a.rs:fn_x", "file_b.rs:fn_y"],
     "poc_available": true,
@@ -193,8 +206,8 @@ Write appraised findings to your assigned output path as a JSON array:
     "poc_path": ".kuriboh/pocs/reviewer-1/poc-uaf.rs",
     "scout_score": 72,
     "files_reviewed": ["src/foo.rs", "src/bar.rs"],
-    "verdict": "confirmed|rejected|needs-review",
-    "appraiser_notes": "Explanation of verdict, severity changes, or validation results"
+    "verdict": "confirmed|adjusted|rejected|needs-review",
+    "appraiser_notes": "Explanation of verdict, severity changes, or falsification attempt"
   }
 ]
 ```

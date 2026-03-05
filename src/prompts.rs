@@ -207,7 +207,8 @@ When you find a vulnerability, attempt a PoC in your git worktree:
 
 ## Output
 
-Write findings to `.kuriboh/findings/reviewer-N.json` as a JSON array:
+Write findings to `.kuriboh/findings/reviewer-N.json` as a JSON array.
+All fields marked * are **required**:
 
 ```json
 [
@@ -216,6 +217,10 @@ Write findings to `.kuriboh/findings/reviewer-N.json` as a JSON array:
     "title": "Short descriptive title",
     "file": "path/to/file.rs:line",
     "description": "What the vulnerability is and why it is dangerous",
+    "reachability": "* How attacker-controlled input flows from entry point to the vulnerable sink (e.g. 'HTTP body → deserialize() → foo() → unsafe write at bar.rs:42')",
+    "evidence": "* Exact file:line + 1-3 line snippet obtained via Read or `rg -n`. E.g. 'src/foo.rs:42: ptr.write(val)  // val is user-controlled'",
+    "exploit_sketch": "* Minimal conditions needed to trigger: e.g. 'Send POST /api with JSON field `len` > usize::MAX; server reads len bytes from attacker body'",
+    "repro_status": "* not_tried|partial|working|not_reproducible",
     "recommendation": "How to fix or mitigate",
     "call_chain": ["file_a.rs:fn_x", "file_b.rs:fn_y"],
     "poc_available": false,
@@ -304,16 +309,21 @@ as a JSON array using this schema:
 [
   {{{{
     "severity": "CRITICAL",
+    "original_severity": "HIGH",
     "title": "Short title",
     "file": "path/to/file.rs:line",
     "description": "...",
+    "reachability": "...",
+    "evidence": "...",
+    "exploit_sketch": "...",
+    "repro_status": "working",
     "recommendation": "...",
     "call_chain": ["..."],
     "poc_available": false,
     "poc_validated": null,
     "poc_path": null,
     "scout_score": 72,
-    "verdict": "confirmed",
+    "verdict": "confirmed|adjusted|needs-review",
     "appraiser_notes": "...",
     "independent_reviewers": 2
   }}}}
