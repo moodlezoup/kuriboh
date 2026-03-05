@@ -82,7 +82,7 @@ main.rs phase loop:
 - Reviewers are agent team **teammates**, not subagents. Their instructions live in `prompts.rs::deep_review()`.
 - Per-phase prompts use `{{{{ }}}}` for literal braces in `format!()` strings.
 - `cleanup()` must `git worktree remove --force` before `rm -rf .kuriboh/`.
-- Scout scoring: 7 metrics computed by Rust (scanner.rs), 3 by LLM (scout subagent). Weighted linear sum (0-100). Formula and weights in `scanner.rs::WEIGHTS`.
+- Scout scoring: 7 metrics computed by Rust (scanner.rs), 3 by LLM (scout subagent). Weighted linear sum (0-100). Weights are inlined in `scanner.rs::compute_weighted_score()`.
 
 ## Important context
 
@@ -92,3 +92,4 @@ main.rs phase loop:
 - Reviewer count default: `ceil(sqrt(total_scored_files))` clamped to [3, 12].
 - `--resume` loads existing `state.json`, validates target match, skips done phases whose sentinels pass, re-runs running/failed phases.
 - Task assignments use a seeded RNG (`--seed` or random) for reproducibility.
+- Agent teams are enabled unconditionally for Phase 3 (`agent_teams: true` in `SessionOpts`). There is no user-facing flag — `runner.rs` adds `--teammate-mode in-process` and sets `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` automatically. This is required because reviewers are teammates (full Claude Code sessions) that spawn specialist subagents (unsafe-auditor, dep-checker, crypto-reviewer). Claude Code prevents nested subagents, so reviewers must be teammates rather than subagents to use specialists.
