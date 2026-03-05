@@ -13,6 +13,8 @@ pub struct SessionOpts {
     pub prompt: String,
     /// Whether to enable agent teams for this session.
     pub agent_teams: bool,
+    /// Override the model for this session. Falls back to `Args::model` if `None`.
+    pub model: Option<String>,
 }
 
 /// Spawn a single Claude Code session, stream its NDJSON output, and return
@@ -25,9 +27,10 @@ pub async fn run_session(args: &Args, opts: &SessionOpts) -> Result<Vec<ClaudeEv
     if let Some(budget) = args.max_budget_usd {
         claude_args.extend(["--max-budget-usd".to_string(), budget.to_string()]);
     }
+    let model = opts.model.as_deref().unwrap_or(&args.model);
     claude_args.extend([
         "--model".to_string(),
-        args.model.clone(),
+        model.to_string(),
         "--max-turns".to_string(),
         args.max_turns.to_string(),
         "--verbose".to_string(),
@@ -43,7 +46,7 @@ pub async fn run_session(args: &Args, opts: &SessionOpts) -> Result<Vec<ClaudeEv
 
     tracing::info!(
         %program,
-        model = %args.model,
+        %model,
         max_turns = args.max_turns,
         agent_teams = opts.agent_teams,
         "Spawning Claude Code session"

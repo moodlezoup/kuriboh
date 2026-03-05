@@ -170,6 +170,7 @@ fn run_exploration<'a>(
             &runner::SessionOpts {
                 prompt,
                 agent_teams: false,
+                model: None,
             },
         )
         .await?;
@@ -215,6 +216,7 @@ fn run_scouting<'a>(
             &runner::SessionOpts {
                 prompt,
                 agent_teams: false,
+                model: None,
             },
         )
         .await?;
@@ -299,6 +301,7 @@ fn run_deep_review<'a>(
             &runner::SessionOpts {
                 prompt,
                 agent_teams: true,
+                model: Some("claude-opus-4-6".to_string()),
             },
         )
         .await?;
@@ -339,6 +342,7 @@ fn run_appraisal_compilation<'a>(
             &runner::SessionOpts {
                 prompt,
                 agent_teams: false,
+                model: None,
             },
         )
         .await?;
