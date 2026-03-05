@@ -2,7 +2,7 @@
 
 ## Project overview
 
-kuriboh is a Rust CLI that wraps Claude Code (`claude` binary) to run automated security reviews of Rust codebases. It installs subagent definition files into the target project, spawns a single Claude Code session with a phased orchestration prompt, streams NDJSON events, and produces a structured report.
+kuriboh is a Rust CLI that wraps Claude Code (`claude` binary) to run automated security reviews of Rust codebases. A deterministic Rust outer scheduler drives a 5-phase pipeline, spawning 4 separate Claude Code sessions for semantic judgment only. Phases are idempotent and tracked in `state.json` with filesystem sentinels, enabling `--resume` from any failure point.
 
 ## Build and run
 
@@ -14,49 +14,65 @@ source "$HOME/.cargo/env"
 cargo build
 
 # Run (requires `claude` CLI on PATH)
-kuriboh --target /path/to/crate --no-sandbox
+kuriboh --target /path/to/crate --dangerously-skip-permissions
+
+# Resume a failed run
+kuriboh --target /path/to/crate --resume
+
+# Reproducible task assignments
+kuriboh --target /path/to/crate --seed 42
 ```
 
-The project has no tests yet. Verify changes with `cargo build` (must produce 0 errors, 0 warnings).
+Run `cargo test` to execute tests. Verify changes with `cargo build` (must produce 0 errors, 0 warnings).
 
 ## Architecture
 
-### Execution flow
+### Execution flow (deterministic outer scheduler)
 
-`main.rs`: `agents::install()` -> `runner::run()` -> `report::parse()` -> `report::write()` -> `agents::cleanup()`
+```
+main.rs phase loop:
+  agents::install()
+  load/create State from .kuriboh/state.json
+  ├─ Phase 1: Exploration     → 1 claude session → sentinel: exploration.md
+  ├─ Phase 2: Scouting        → Rust computes 7 static metrics (scanner.rs)
+  │                            → 1 claude session (scout subagents for 3 LLM metrics)
+  │                            → Rust merges + applies weighting → scores.json
+  ├─ Phase 3: Deep Review     → Rust creates worktrees + task assignments
+  │                            → 1 claude agent team session (lead + reviewer teammates)
+  │                            → sentinel: all findings/reviewer-N.json exist
+  ├─ Phase 4+5: Appraisal &   → 1 claude session (appraiser subagents + compilation)
+  │  Compilation               → sentinel: compiled-findings.json
+  └─ Report                   → Rust reads compiled-findings.json → writes report
+  agents::cleanup()
+```
 
-### 5-phase orchestration prompt (in `runner.rs::build_prompt()`)
-
-1. **Exploration** -- built-in Explore subagent surveys codebase -> `.kuriboh/exploration.md`
-2. **Scouting** -- scout subagent (Haiku, parallel) per `.rs` file -> `.kuriboh/scores.json`
-3. **Deep Review** -- reviewer **teammates** (agent team, `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`)
-   with git worktrees, weighted-random file assignment, DFS approach. Teammates are full Claude
-   Code sessions and CAN spawn specialist subagents (unsafe-auditor, dep-checker, crypto-reviewer).
-4. **Appraisal** -- appraiser subagent per reviewer validates findings, tests PoCs, assigns verdicts
-5. **Compilation** -- lead deduplicates and produces final report
+4 Claude Code sessions total. Rust handles all deterministic work (file enumeration, static metrics, score merging, task assignment, worktree creation, sentinel checking, report generation). Claude handles semantic judgment only.
 
 ### Key modules
 
-- `runner.rs` -- Spawns Claude Code subprocess, streams stdout/stderr concurrently with `tokio::select!`, builds the orchestration prompt. TUI hook point: replace `Vec<ClaudeEvent>` with a channel sender.
-- `events.rs` -- `ClaudeEvent` enum modeling Claude Code's `--output-format stream-json` NDJSON. Types: System, Assistant, User, Result.
-- `sandbox.rs` -- `SandboxConfig::build_command()` returns `(program, argv)`. Conditionally adds `--dangerously-skip-permissions` based on CLI flag.
-- `agents/templates.rs` -- 5 subagent definitions as `pub const &str` with YAML frontmatter + Markdown prompt. Agents: scout, appraiser, unsafe-auditor, dep-checker, crypto-reviewer. The reviewer is no longer a subagent definition — its instructions are inlined in the orchestration prompt as the teammate spawn prompt.
-- `agents/mod.rs` -- `BUILTIN_AGENTS` registry, `install()` writes `.claude/agents/*.md` and creates `.kuriboh/{findings,worktrees,pocs}`, `cleanup()` handles git worktree removal then deletes `.kuriboh/`.
-- `report.rs` -- `Report` and `Finding` structs with serde. `Finding` includes call_chain, poc_available/validated/path, verdict, appraiser_notes, independent_reviewers. Renders Markdown or JSON.
-- `cli.rs` -- clap-derived Args. Notable: `--reviewers` (Option<u32>, dynamic default), `--max-turns` (400), `--keep-workspace`, `--dangerously-skip-permissions`, `--verbose`.
+- `main.rs` -- Phase loop: iterates phases, checks sentinels via `state::check_sentinel()`, manages `PhaseStatus` transitions, persists state after each phase. Contains per-phase async functions (`run_exploration`, `run_scouting`, `run_deep_review`, `run_appraisal_compilation`).
+- `state.rs` -- `State` struct persisted to `.kuriboh/state.json`. `PhaseStatus` enum (Pending/Running/Done/Failed). `check_sentinel()` validates phase outputs. Atomic save via tmp+rename.
+- `scanner.rs` -- File enumeration (`enumerate_files`), 7 static metrics (`compute_static_metrics`), LLM score loading/merging (`load_llm_scores`, `merge_scores`), weighted scoring (`compute_weighted_score`), seeded task assignment (`generate_assignments`), reviewer count calculation.
+- `prompts.rs` -- Per-phase prompt builders: `exploration()`, `llm_scouting()`, `deep_review()`, `appraisal_and_compilation()`. Each returns a focused single-phase prompt.
+- `runner.rs` -- Generic Claude Code session spawner. `run_session(args, SessionOpts)` takes a prompt and `agent_teams` flag. Streams NDJSON events.
+- `events.rs` -- `ClaudeEvent` enum modeling Claude Code's `--output-format stream-json` NDJSON.
+- `agents/templates.rs` -- 5 subagent definitions: scout (3 LLM metrics only), appraiser, unsafe-auditor, dep-checker, crypto-reviewer.
+- `agents/mod.rs` -- `BUILTIN_AGENTS` registry, `install()` writes `.claude/agents/*.md`, `cleanup()` handles worktree removal then deletes `.kuriboh/`.
+- `report.rs` -- `Report` and `Finding` structs. `parse_from_workspace()` reads compiled-findings.json directly. Renders Markdown or JSON.
+- `cli.rs` -- clap-derived Args. Notable: `--reviewers`, `--max-turns` (400), `--resume`, `--seed`, `--keep-workspace`, `--dangerously-skip-permissions`, `--verbose`, `--estimate`.
 
 ### `.kuriboh/` workspace layout
 
 ```
 .kuriboh/
-  exploration.md         # Phase 1
-  scores.json            # Phase 2
-  scouting-summary.md    # Phase 2
-  task-assignments.json  # Phase 3
-  findings/              # Phase 3-4 (reviewer-N.json, appraised-N.json)
-  worktrees/             # Phase 3 (git worktrees per reviewer)
-  pocs/                  # Phase 3 (PoC files per reviewer)
-  compiled-findings.json # Phase 5
+  state.json               # Pipeline state (phases, files, assignments, seed)
+  exploration.md           # Phase 1 output
+  llm-scores.json          # Phase 2b (3 LLM metrics per file)
+  scores.json              # Phase 2c (merged 10-metric scores)
+  findings/                # Phase 3-4 (reviewer-N.json, appraised-N.json)
+  worktrees/               # Phase 3 (git worktrees per reviewer)
+  pocs/                    # Phase 3 (PoC files per reviewer)
+  compiled-findings.json   # Phase 5 output
 ```
 
 ## Coding conventions
@@ -64,15 +80,17 @@ The project has no tests yet. Verify changes with `cargo build` (must produce 0 
 - Use `anyhow::Result` for error handling throughout.
 - Use `tracing` for logging (`info!` for milestones, `debug!` for details, `warn!` for recoverable issues).
 - Subagent templates are embedded as `pub const &str` in `templates.rs`. Each uses YAML frontmatter (`name`, `description`, `tools`, `model`, optional `background: true`).
-- Adding a new specialist subagent (spawned by reviewer teammates): (1) add `pub const` in `templates.rs`, (2) add `AgentDef` entry in `BUILTIN_AGENTS` in `mod.rs`.
-- Reviewers are agent team **teammates**, not subagents. Their instructions live in the orchestration prompt in `runner.rs::build_prompt()`, not in `templates.rs`.
-- The orchestration prompt uses `{{{{ }}}}` for literal braces in `format!()` strings (double-escaped because it's inside `r#"..."#`).
+- Adding a new specialist subagent: (1) add `pub const` in `templates.rs`, (2) add `AgentDef` entry in `BUILTIN_AGENTS` in `mod.rs`.
+- Reviewers are agent team **teammates**, not subagents. Their instructions live in `prompts.rs::deep_review()`.
+- Per-phase prompts use `{{{{ }}}}` for literal braces in `format!()` strings.
 - `cleanup()` must `git worktree remove --force` before `rm -rf .kuriboh/`.
+- Scout scoring: 7 metrics computed by Rust (scanner.rs), 3 by LLM (scout subagent). Weighted linear sum (0-100). Formula and weights in `scanner.rs::WEIGHTS`.
 
 ## Important context
 
 - Running `claude` inside another Claude Code session requires unsetting `CLAUDECODE=1` env var — handled by `.env_remove("CLAUDECODE")` in runner.rs.
-- `--dangerously-skip-permissions` is passed through to the inner Claude Code session only when explicitly requested. It's safe when an isolation boundary is in place (native sandbox, Docker, container).
+- `--dangerously-skip-permissions` is passed through to inner Claude Code sessions only when explicitly requested.
 - `--verbose` is required when using `--output-format stream-json` with `--print` mode.
-- Scout scoring: weighted linear sum (0-100) of 10 heuristic metrics. See `templates.rs::SCOUT` for the full rubric.
 - Reviewer count default: `ceil(sqrt(total_scored_files))` clamped to [3, 12].
+- `--resume` loads existing `state.json`, validates target match, skips done phases whose sentinels pass, re-runs running/failed phases.
+- Task assignments use a seeded RNG (`--seed` or random) for reproducibility.
