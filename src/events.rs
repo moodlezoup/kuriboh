@@ -116,18 +116,6 @@ pub fn parse_line(line: &str) -> Option<ClaudeEvent> {
     }
 }
 
-/// Extract the final synthesized result text from a completed event stream.
-pub fn final_result(events: &[ClaudeEvent]) -> Option<&str> {
-    events.iter().rev().find_map(|ev| match ev {
-        ClaudeEvent::Result {
-            result,
-            is_error: false,
-            ..
-        } => Some(result.as_str()),
-        _ => None,
-    })
-}
-
 /// Sum token costs across all `Result` events (agent team leads + teammates).
 pub fn total_cost_usd(events: &[ClaudeEvent]) -> f64 {
     events
