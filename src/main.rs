@@ -23,8 +23,7 @@ async fn main() -> Result<()> {
     };
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive(default_level.parse()?),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(default_level.parse()?),
         )
         .init();
 
@@ -116,7 +115,10 @@ async fn run_phase(
     state: &mut State,
     args: &cli::Args,
     phase_name: &str,
-    execute: fn(&mut State, &cli::Args) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + '_>>,
+    execute: for<'a> fn(
+        &'a mut State,
+        &'a cli::Args,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>>,
 ) -> Result<()> {
     // Check if already done and sentinel still valid.
     if *state.phase_status(phase_name) == PhaseStatus::Done {
@@ -143,8 +145,7 @@ async fn run_phase(
                 Ok(())
             } else {
                 state.phase_mut(phase_name).status = PhaseStatus::Failed;
-                state.phase_mut(phase_name).reason =
-                    Some("sentinel check failed".to_string());
+                state.phase_mut(phase_name).reason = Some("sentinel check failed".to_string());
                 state.save(&args.target)?;
                 bail!("Phase {phase_name} completed but sentinel check failed");
             }
@@ -165,10 +166,8 @@ fn run_exploration<'a>(
     args: &'a cli::Args,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + 'a>> {
     Box::pin(async move {
-        let prompt = prompts::exploration(
-            &args.target.display().to_string(),
-            args.prompt.as_deref(),
-        );
+        let prompt =
+            prompts::exploration(&args.target.display().to_string(), args.prompt.as_deref());
         let events = runner::run_session(
             args,
             &runner::SessionOpts {
@@ -201,8 +200,7 @@ fn run_scouting<'a>(
             file_list
         };
 
-        let file_strings: Vec<String> =
-            file_list.iter().map(|p| p.display().to_string()).collect();
+        let file_strings: Vec<String> = file_list.iter().map(|p| p.display().to_string()).collect();
         state.files = file_strings.clone();
 
         let mut static_scores: Vec<(String, scanner::StaticMetrics)> = Vec::new();
@@ -228,8 +226,7 @@ fn run_scouting<'a>(
 
         // 2c: Merge scores.
         let llm_scores_path = args.target.join(".kuriboh/llm-scores.json");
-        let llm_scores = scanner::load_llm_scores(&llm_scores_path)
-            .unwrap_or_default();
+        let llm_scores = scanner::load_llm_scores(&llm_scores_path).unwrap_or_default();
 
         let file_scores = scanner::merge_scores(&static_scores, &llm_scores);
 

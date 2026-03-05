@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use rand::rngs::SmallRng;
 use rand::prelude::*;
+use rand::rngs::SmallRng;
 use serde::{Deserialize, Serialize};
 
 use crate::state::TaskAssignment;
@@ -253,12 +253,11 @@ pub fn compute_weighted_score(static_m: &StaticMetrics, llm_m: &LlmMetrics) -> (
         weighted_sum += score as f64 * *weight as f64 / 100.0;
     }
 
-    let combo_bonus =
-        if static_m.unsafe_density > 0 && static_m.raw_pointer_usage > 0 {
-            10
-        } else {
-            0
-        };
+    let combo_bonus = if static_m.unsafe_density > 0 && static_m.raw_pointer_usage > 0 {
+        10
+    } else {
+        0
+    };
     let total = (weighted_sum as u32 + combo_bonus).clamp(0, 100);
 
     (total, combo_bonus)
@@ -351,7 +350,10 @@ pub fn generate_assignments(
 
     let mut rng = SmallRng::seed_from_u64(seed);
 
-    let weights: Vec<f64> = scores.iter().map(|s| s.weighted_score.max(1) as f64).collect();
+    let weights: Vec<f64> = scores
+        .iter()
+        .map(|s| s.weighted_score.max(1) as f64)
+        .collect();
     let total_weight: f64 = weights.iter().sum();
 
     let mut assignments = Vec::new();
@@ -430,7 +432,9 @@ mod tests {
 
     #[test]
     fn static_metrics_basic() {
-        let source = r#"
+        // Source must have >= 50 non-blank/non-comment lines for scale_loc > 0.
+        let mut source = String::from(
+            r#"
 fn main() {
     let x = foo().unwrap();
     let y = bar().expect("oops");
@@ -441,8 +445,13 @@ unsafe fn danger() {
 }
 
 // TODO: fix this
-"#;
-        let m = compute_static_metrics(source);
+"#,
+        );
+        // Pad to exceed the 50-line LOC threshold.
+        for i in 0..50 {
+            source.push_str(&format!("fn stub_{i}() {{}}\n"));
+        }
+        let m = compute_static_metrics(&source);
         assert!(m.loc > 0);
         assert!(m.unsafe_density > 0, "should detect unsafe");
         assert!(m.unwrap_density > 0, "should detect unwrap/expect");

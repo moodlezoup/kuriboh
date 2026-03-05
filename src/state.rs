@@ -101,8 +101,7 @@ impl State {
         std::fs::create_dir_all(dir)?;
         let tmp = dir.join("state.json.tmp");
         let data = serde_json::to_string_pretty(self).context("serializing state")?;
-        std::fs::write(&tmp, &data)
-            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::write(&tmp, &data).with_context(|| format!("writing {}", tmp.display()))?;
         std::fs::rename(&tmp, &path)
             .with_context(|| format!("renaming {} -> {}", tmp.display(), path.display()))?;
         Ok(())

@@ -245,11 +245,7 @@ Max turns: {max_turns}{guidance}"#
 }
 
 /// Phase 4+5: Appraisal and compilation prompt.
-pub fn appraisal_and_compilation(
-    reviewer_ids: &[u32],
-    target: &str,
-    max_turns: u32,
-) -> String {
+pub fn appraisal_and_compilation(reviewer_ids: &[u32], target: &str, max_turns: u32) -> String {
     let reviewer_list = reviewer_ids
         .iter()
         .map(|id| {

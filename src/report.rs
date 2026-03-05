@@ -282,26 +282,24 @@ pub fn parse_from_workspace(target: &Path) -> Result<Report> {
     let exploration = std::fs::read_to_string(kb.join("exploration.md")).ok();
 
     // Read scores for scouting summary.
-    let scouting_summary =
-        std::fs::read_to_string(kb.join("scores.json"))
-            .ok()
-            .map(|data| {
-                let scores: Vec<serde_json::Value> =
-                    serde_json::from_str(&data).unwrap_or_default();
-                let total = scores.len();
-                let critical = scores
-                    .iter()
-                    .filter(|s| s["weighted_score"].as_u64().unwrap_or(0) >= 70)
-                    .count();
-                let high = scores
-                    .iter()
-                    .filter(|s| {
-                        let v = s["weighted_score"].as_u64().unwrap_or(0);
-                        (50..70).contains(&v)
-                    })
-                    .count();
-                format!("{total} files scored. {critical} critical-tier, {high} high-tier.")
-            });
+    let scouting_summary = std::fs::read_to_string(kb.join("scores.json"))
+        .ok()
+        .map(|data| {
+            let scores: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+            let total = scores.len();
+            let critical = scores
+                .iter()
+                .filter(|s| s["weighted_score"].as_u64().unwrap_or(0) >= 70)
+                .count();
+            let high = scores
+                .iter()
+                .filter(|s| {
+                    let v = s["weighted_score"].as_u64().unwrap_or(0);
+                    (50..70).contains(&v)
+                })
+                .count();
+            format!("{total} files scored. {critical} critical-tier, {high} high-tier.")
+        });
 
     // Sum costs from state.json if available.
     let total_cost = State::load(target)

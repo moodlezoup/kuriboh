@@ -110,7 +110,10 @@ pub async fn run_session(args: &Args, opts: &SessionOpts) -> Result<Vec<ClaudeEv
 
     let status = child.wait().await.context("waiting for claude to exit")?;
     if !status.success() {
-        tracing::warn!(exit_code = status.code().unwrap_or(-1), "claude exited non-zero");
+        tracing::warn!(
+            exit_code = status.code().unwrap_or(-1),
+            "claude exited non-zero"
+        );
     }
 
     if collected.is_empty() {
