@@ -382,7 +382,7 @@ fn print_estimate(args: &cli::Args) {
     println!();
     println!("Target:       {}", args.target.display());
     println!("Rust files:   {file_count}");
-    println!("Model:        {}", args.model);
+    println!("Model:        {} (lead: claude-opus-4-6)", args.model);
     println!("Reviewers:    {reviewers} (+{reserves} reserve)");
     println!("Max turns:    {}", args.max_turns);
     if let Some(budget) = args.max_budget_usd {
