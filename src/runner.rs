@@ -112,8 +112,35 @@ pub async fn run_session(args: &Args, opts: &SessionOpts) -> Result<Vec<ClaudeEv
     }
 
     let status = child.wait().await.context("waiting for claude to exit")?;
+
+    // Extract error message from Result events (Claude Code reports app-level
+    // errors here, e.g. invalid API key, model not found).
+    let session_error = collected.iter().find_map(|ev| match ev {
+        ClaudeEvent::Result {
+            is_error: true,
+            result,
+            ..
+        } => Some(result.clone()),
+        _ => None,
+    });
+
     if !status.success() {
-        tracing::warn!(exit_code = status.code(), "claude exited non-zero");
+        let code = status
+            .code()
+            .map_or_else(|| "signal".to_string(), |c| c.to_string());
+        if let Some(err_msg) = &session_error {
+            bail!("claude exited with code {code}: {err_msg}");
+        }
+        let stderr_trimmed = stderr_buf.trim();
+        if stderr_trimmed.is_empty() {
+            bail!("claude exited with code {code} (no output on stderr or in events)");
+        }
+        bail!("claude exited with code {code}. Stderr:\n{stderr_trimmed}");
+    }
+
+    // Catch application errors that don't set a non-zero exit code.
+    if let Some(err_msg) = session_error {
+        bail!("claude session error: {err_msg}");
     }
 
     if collected.is_empty() {

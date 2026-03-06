@@ -249,6 +249,14 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
 }
 
 async fn run_deep_review(state: &mut State, args: &cli::Args) -> Result<()> {
+    // Prune stale worktree metadata from prior runs (e.g. --keep-workspace
+    // leaves .git/worktrees/ references to deleted directories, which blocks
+    // branch reuse even with -B).
+    let _ = std::process::Command::new("git")
+        .args(["worktree", "prune"])
+        .current_dir(&args.target)
+        .output();
+
     // Create git worktrees and PoC dirs in parallel.
     let wt_results: Vec<Result<()>> = state
         .task_assignments
@@ -257,20 +265,27 @@ async fn run_deep_review(state: &mut State, args: &cli::Args) -> Result<()> {
             let wt_path = args
                 .target
                 .join(format!(".kuriboh/worktrees/reviewer-{}", a.reviewer_id));
-            if !wt_path.exists() {
-                let output = std::process::Command::new("git")
-                    .args(["worktree", "add"])
+            // Remove existing worktree (from --keep-workspace or partial prior run).
+            if wt_path.exists() {
+                let _ = std::process::Command::new("git")
+                    .args(["worktree", "remove", "--force"])
                     .arg(&wt_path)
-                    .arg(format!("-b kuriboh-review-{}", a.reviewer_id))
                     .current_dir(&args.target)
-                    .output()?;
-                if !output.status.success() {
-                    tracing::warn!(
-                        reviewer = a.reviewer_id,
-                        stderr = %String::from_utf8_lossy(&output.stderr),
-                        "Failed to create worktree"
-                    );
-                }
+                    .output();
+            }
+            let output = std::process::Command::new("git")
+                .args(["worktree", "add"])
+                .arg(&wt_path)
+                .arg("-B")
+                .arg(format!("kuriboh-review-{}", a.reviewer_id))
+                .current_dir(&args.target)
+                .output()?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!(
+                    "git worktree add failed for reviewer {}: {stderr}",
+                    a.reviewer_id
+                );
             }
             let poc_dir = args
                 .target
