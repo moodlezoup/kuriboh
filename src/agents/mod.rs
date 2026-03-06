@@ -142,24 +142,22 @@ fn apply_config(agents: &mut Vec<AgentDef>, config: AgentsConfig) -> Result<()> 
     Ok(())
 }
 
-/// Installs subagent definition files into `<target>/.claude/agents/`.
+/// Installs agent definitions for Claude Code to discover.
 ///
-/// This is called before spawning `claude` so that Claude Code can discover
-/// and delegate to the specialized reviewers during the agent team run.
+/// Real files are written to `.kuriboh/agents/`, and symlinks are created in
+/// `.claude/agents/` pointing back to them. This keeps the target repo clean —
+/// cleanup only needs to remove symlinks, and `.kuriboh/` deletion takes care
+/// of the real files.
 ///
 /// If `config` is provided, agent prompts may be overridden and custom agents
 /// added from the TOML config file. Otherwise the embedded templates are used.
 pub fn install(target: &Path, config: &Option<PathBuf>) -> Result<()> {
-    let agents_dir = target.join(".claude").join("agents");
-    std::fs::create_dir_all(&agents_dir)
-        .with_context(|| format!("creating {}", agents_dir.display()))?;
-
     // Create the .kuriboh/ workspace for intermediate review artifacts
     // (exploration.md, scores.json, etc.). Phases write here; other agents read.
     let kuriboh_dir = target.join(".kuriboh");
     std::fs::create_dir_all(&kuriboh_dir)
         .with_context(|| format!("creating {}", kuriboh_dir.display()))?;
-    for subdir in ["findings", "worktrees", "pocs", "frontier"] {
+    for subdir in ["agents", "findings", "worktrees", "pocs", "frontier"] {
         let sub = kuriboh_dir.join(subdir);
         std::fs::create_dir_all(&sub).with_context(|| format!("creating {}", sub.display()))?;
     }
@@ -180,27 +178,60 @@ pub fn install(target: &Path, config: &Option<PathBuf>) -> Result<()> {
         }
     }
 
-    let mut installed_names: Vec<String> = Vec::new();
-    for agent in &agents {
-        let dest = agents_dir.join(format!("{}.md", agent.name));
-        std::fs::write(&dest, agent.render())
-            .with_context(|| format!("writing agent def {}", dest.display()))?;
-        installed_names.push(agent.name.clone());
-        tracing::debug!(agent = %agent.name, path = %dest.display(), "Installed agent");
-    }
+    let real_agents_dir = kuriboh_dir.join("agents");
+    let link_dir = target.join(".claude").join("agents");
+    std::fs::create_dir_all(&link_dir)
+        .with_context(|| format!("creating {}", link_dir.display()))?;
 
-    // Write manifest so cleanup knows exactly which files to remove.
-    let manifest_path = kuriboh_dir.join("installed-agents.json");
-    let manifest_json =
-        serde_json::to_string(&installed_names).context("serializing installed-agents manifest")?;
-    std::fs::write(&manifest_path, manifest_json)
-        .with_context(|| format!("writing {}", manifest_path.display()))?;
+    for agent in &agents {
+        let filename = format!("{}.md", agent.name);
+
+        // Write the real file into .kuriboh/agents/.
+        let real_path = real_agents_dir.join(&filename);
+        std::fs::write(&real_path, agent.render())
+            .with_context(|| format!("writing agent def {}", real_path.display()))?;
+
+        // Symlink from .claude/agents/<name>.md → .kuriboh/agents/<name>.md.
+        // Use a relative path so it works if the repo is moved.
+        let link_path = link_dir.join(&filename);
+        let relative_target = PathBuf::from("..")
+            .join("..")
+            .join(".kuriboh")
+            .join("agents")
+            .join(&filename);
+
+        // Remove any stale symlink or file at the link path.
+        if link_path.symlink_metadata().is_ok() {
+            std::fs::remove_file(&link_path)
+                .with_context(|| format!("removing stale {}", link_path.display()))?;
+        }
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&relative_target, &link_path).with_context(|| {
+            format!(
+                "symlinking {} → {}",
+                link_path.display(),
+                relative_target.display()
+            )
+        })?;
+
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_file(&relative_target, &link_path).with_context(|| {
+            format!(
+                "symlinking {} → {}",
+                link_path.display(),
+                relative_target.display()
+            )
+        })?;
+
+        tracing::debug!(agent = %agent.name, link = %link_path.display(), "Installed agent");
+    }
 
     Ok(())
 }
 
-/// Remove the `.kuriboh/` workspace directory and installed agent files after
-/// a completed run.
+/// Remove the `.kuriboh/` workspace directory and symlinks from `.claude/agents/`
+/// after a completed run.
 ///
 /// Skipped when `--keep-workspace` is set, so users can inspect intermediate
 /// artifacts like `exploration.md`, `scores.json`, worktrees, and PoCs.
@@ -213,12 +244,9 @@ pub fn cleanup(target: &Path) -> Result<()> {
         return Ok(());
     }
 
-    // Read the agent manifest before we delete .kuriboh/.
-    let manifest_path = kuriboh_dir.join("installed-agents.json");
-    let installed_agents: Vec<String> = std::fs::read_to_string(&manifest_path)
-        .ok()
-        .and_then(|data| serde_json::from_str(&data).ok())
-        .unwrap_or_default();
+    // Remove symlinks we created in .claude/agents/ before deleting .kuriboh/
+    // (so the symlink targets still exist for identification).
+    remove_agent_symlinks(target);
 
     // Remove any git worktrees created during the review.
     let worktrees_dir = kuriboh_dir.join("worktrees");
@@ -265,21 +293,48 @@ pub fn cleanup(target: &Path) -> Result<()> {
         .with_context(|| format!("cleaning up {}", kuriboh_dir.display()))?;
     tracing::debug!(path = %kuriboh_dir.display(), "Cleaned up .kuriboh workspace");
 
-    // Remove agent files that we installed into .claude/agents/.
+    Ok(())
+}
+
+/// Remove symlinks in `.claude/agents/` that point into `.kuriboh/`.
+///
+/// Only removes symlinks — never deletes real files, so user-owned agents are
+/// always preserved. Cleans up empty `.claude/agents/` and `.claude/` dirs.
+fn remove_agent_symlinks(target: &Path) {
     let agents_dir = target.join(".claude").join("agents");
-    for name in &installed_agents {
-        let path = agents_dir.join(format!("{name}.md"));
-        if path.exists() {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("removing agent file {}", path.display()))?;
-            tracing::debug!(agent = %name, "Removed installed agent");
+    let Ok(entries) = std::fs::read_dir(&agents_dir) else {
+        return;
+    };
+
+    let kuriboh_agents = target.join(".kuriboh").join("agents");
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Only consider symlinks.
+        let Ok(meta) = path.symlink_metadata() else {
+            continue;
+        };
+        if !meta.file_type().is_symlink() {
+            continue;
+        }
+        // Check that the symlink resolves into .kuriboh/agents/.
+        let is_ours = std::fs::read_link(&path)
+            .ok()
+            .and_then(|link_target| {
+                // Resolve the relative symlink against the directory containing it.
+                let resolved = agents_dir.join(&link_target);
+                std::fs::canonicalize(&resolved).ok()
+            })
+            .is_some_and(|canonical| canonical.starts_with(&kuriboh_agents));
+
+        if is_ours && std::fs::remove_file(&path).is_ok() {
+            tracing::debug!(path = %path.display(), "Removed agent symlink");
         }
     }
+
     // Remove .claude/agents/ and .claude/ if we left them empty.
     remove_dir_if_empty(&agents_dir);
     remove_dir_if_empty(&target.join(".claude"));
-
-    Ok(())
 }
 
 /// Remove a directory only if it exists and is empty.
@@ -380,38 +435,62 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_removes_installed_agents() {
+    fn install_creates_symlinks() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path();
 
-        // Simulate install: create .claude/agents/ with agent files and manifest.
+        install(target, &None).unwrap();
+
         let agents_dir = target.join(".claude/agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("scout.md"), "---\nname: scout\n---\n").unwrap();
-        std::fs::write(agents_dir.join("reviewer.md"), "---\nname: reviewer\n---\n").unwrap();
-        // A pre-existing user agent that should NOT be removed.
+        let kuriboh_agents = target.join(".kuriboh/agents");
+
+        // Every built-in agent should have a symlink in .claude/agents/
+        // and a real file in .kuriboh/agents/.
+        for agent in templates::builtin_agents() {
+            let link = agents_dir.join(format!("{}.md", agent.name));
+            let real = kuriboh_agents.join(format!("{}.md", agent.name));
+
+            assert!(real.exists(), "real file missing for {}", agent.name);
+            assert!(
+                link.symlink_metadata().unwrap().file_type().is_symlink(),
+                "{} should be a symlink",
+                agent.name
+            );
+            // The symlink should resolve to the real file.
+            let resolved = std::fs::canonicalize(&link).unwrap();
+            let expected = std::fs::canonicalize(&real).unwrap();
+            assert_eq!(resolved, expected);
+        }
+    }
+
+    #[test]
+    fn cleanup_removes_symlinks_preserves_user_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path();
+
+        install(target, &None).unwrap();
+
+        // Add a user-owned (non-symlink) agent file.
+        let agents_dir = target.join(".claude/agents");
         std::fs::write(
             agents_dir.join("my-custom.md"),
             "---\nname: my-custom\n---\n",
         )
         .unwrap();
 
-        let kuriboh_dir = target.join(".kuriboh");
-        std::fs::create_dir_all(&kuriboh_dir).unwrap();
-        std::fs::write(
-            kuriboh_dir.join("installed-agents.json"),
-            r#"["scout","reviewer"]"#,
-        )
-        .unwrap();
-
         cleanup(target).unwrap();
 
         // .kuriboh/ should be gone.
-        assert!(!kuriboh_dir.exists());
-        // Installed agents should be removed.
-        assert!(!agents_dir.join("scout.md").exists());
-        assert!(!agents_dir.join("reviewer.md").exists());
-        // User's agent should still be there.
+        assert!(!target.join(".kuriboh").exists());
+        // All symlinks should be gone.
+        for agent in templates::builtin_agents() {
+            assert!(
+                !agents_dir.join(format!("{}.md", agent.name)).exists(),
+                "symlink for {} should be removed",
+                agent.name
+            );
+        }
+        // User's real file should still be there.
         assert!(agents_dir.join("my-custom.md").exists());
         // .claude/agents/ should NOT be removed (still has user's file).
         assert!(agents_dir.exists());
@@ -422,32 +501,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path();
 
-        let agents_dir = target.join(".claude/agents");
-        std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(agents_dir.join("scout.md"), "agent").unwrap();
-
-        let kuriboh_dir = target.join(".kuriboh");
-        std::fs::create_dir_all(&kuriboh_dir).unwrap();
-        std::fs::write(kuriboh_dir.join("installed-agents.json"), r#"["scout"]"#).unwrap();
-
+        install(target, &None).unwrap();
         cleanup(target).unwrap();
 
         // Both .claude/agents/ and .claude/ should be removed (empty).
-        assert!(!agents_dir.exists());
+        assert!(!target.join(".claude/agents").exists());
         assert!(!target.join(".claude").exists());
     }
 
     #[test]
-    fn cleanup_tolerates_missing_manifest() {
+    fn cleanup_tolerates_no_kuriboh_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        cleanup(dir.path()).unwrap();
+    }
+
+    #[test]
+    fn install_replaces_stale_symlinks() {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path();
 
-        let kuriboh_dir = target.join(".kuriboh");
-        std::fs::create_dir_all(&kuriboh_dir).unwrap();
-        // No manifest file — should not error.
+        // First install.
+        install(target, &None).unwrap();
+        // Second install (simulating --resume re-running install).
+        install(target, &None).unwrap();
 
-        cleanup(target).unwrap();
-        assert!(!kuriboh_dir.exists());
+        // Should still work — no "file exists" errors.
+        let link = target.join(".claude/agents/scout.md");
+        assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
     }
 
     #[test]
