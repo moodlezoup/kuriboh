@@ -208,7 +208,10 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
         .par_iter()
         .map(|file_path| {
             let full_path = args.target.join(file_path);
-            let source = std::fs::read_to_string(&full_path).unwrap_or_default();
+            let source = std::fs::read_to_string(&full_path).unwrap_or_else(|e| {
+                tracing::warn!(file = %full_path.display(), err = %e, "Failed to read file, using empty source");
+                String::new()
+            });
             let metrics = scanner::compute_static_metrics(&source);
             (file_path.display().to_string(), metrics)
         })
@@ -337,6 +340,10 @@ async fn run_deep_review(state: &mut State, args: &cli::Args) -> Result<()> {
             .target
             .join(format!(".kuriboh/findings/reviewer-{}.json", a.reviewer_id));
         if !path.exists() {
+            tracing::warn!(
+                reviewer_id = a.reviewer_id,
+                "Reserve reviewer findings missing, writing empty []"
+            );
             std::fs::write(&path, "[]")?;
         }
     }

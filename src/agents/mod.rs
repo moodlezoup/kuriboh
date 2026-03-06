@@ -81,12 +81,57 @@ fn load_config(path: &Path) -> Result<AgentsConfig> {
     toml::from_str(&data).with_context(|| format!("parsing agents config {}", path.display()))
 }
 
+/// Validate that an agent name is safe for use in file paths.
+///
+/// Rejects names containing path separators, `..`, or control characters.
+/// Only `[a-zA-Z0-9_-]` are allowed.
+fn validate_agent_name(name: &str) -> Result<()> {
+    if name.is_empty() {
+        bail!("agent name must not be empty");
+    }
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        bail!("agent name '{name}' contains invalid characters (only [a-zA-Z0-9_-] allowed)");
+    }
+    Ok(())
+}
+
+/// Validate that agent config string fields do not contain newlines or carriage
+/// returns, which would break YAML frontmatter rendering.
+fn validate_agent_fields(overrides: &AgentOverride) -> Result<()> {
+    let check = |field: &str, value: &str| -> Result<()> {
+        if value.contains('\n') || value.contains('\r') {
+            bail!("agent config field '{field}' must not contain newlines");
+        }
+        Ok(())
+    };
+    if let Some(v) = &overrides.description {
+        check("description", v)?;
+    }
+    if let Some(v) = &overrides.tools {
+        check("tools", v)?;
+    }
+    if let Some(v) = &overrides.disallowed_tools {
+        check("disallowed_tools", v)?;
+    }
+    if let Some(v) = &overrides.model {
+        check("model", v)?;
+    }
+    if let Some(v) = &overrides.permission_mode {
+        check("permission_mode", v)?;
+    }
+    Ok(())
+}
+
 /// Applies overrides from the config to the built-in agents, and adds any new
 /// custom agents defined in the config.
 fn apply_config(agents: &mut Vec<AgentDef>, config: AgentsConfig) -> Result<()> {
-    let builtin_names: Vec<String> = agents.iter().map(|a| a.name.clone()).collect();
-
     for (name, overrides) in config.agents {
+        validate_agent_name(&name)?;
+        validate_agent_fields(&overrides)?;
+
         if let Some(agent) = agents.iter_mut().find(|a| a.name == name) {
             // Override fields on a built-in agent.
             if let Some(desc) = overrides.description {
@@ -121,10 +166,6 @@ fn apply_config(agents: &mut Vec<AgentDef>, config: AgentsConfig) -> Result<()> 
             let prompt = overrides
                 .prompt
                 .with_context(|| format!("custom agent '{name}' requires a 'prompt' field"))?;
-
-            if builtin_names.contains(&name) {
-                bail!("agent name '{name}' conflicts with a built-in agent");
-            }
 
             agents.push(AgentDef {
                 name,
@@ -546,5 +587,64 @@ mod tests {
 
         let err = apply_config(&mut agents, config).unwrap_err();
         assert!(err.to_string().contains("requires a 'description' field"));
+    }
+
+    #[test]
+    fn rejects_path_traversal_in_agent_name() {
+        let mut agents = templates::builtin_agents();
+        let config: AgentsConfig = toml::from_str(
+            r#"
+            [agents."../../etc/evil"]
+            description = "malicious"
+            prompt = "pwned"
+            "#,
+        )
+        .unwrap();
+
+        let err = apply_config(&mut agents, config).unwrap_err();
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn rejects_slash_in_agent_name() {
+        let mut agents = templates::builtin_agents();
+        let config: AgentsConfig = toml::from_str(
+            r#"
+            [agents."sub/agent"]
+            description = "sneaky"
+            prompt = "hidden"
+            "#,
+        )
+        .unwrap();
+
+        let err = apply_config(&mut agents, config).unwrap_err();
+        assert!(err.to_string().contains("invalid characters"));
+    }
+
+    #[test]
+    fn rejects_newline_in_config_field() {
+        let mut agents = templates::builtin_agents();
+        let config: AgentsConfig = toml::from_str(
+            r#"
+            [agents.unsafe-auditor]
+            permission_mode = "bypassPermissions\ndisallowedTools: "
+            "#,
+        )
+        .unwrap();
+
+        let err = apply_config(&mut agents, config).unwrap_err();
+        assert!(err.to_string().contains("must not contain newlines"));
+    }
+
+    #[test]
+    fn accepts_valid_agent_names() {
+        assert!(validate_agent_name("my-agent").is_ok());
+        assert!(validate_agent_name("agent_v2").is_ok());
+        assert!(validate_agent_name("CamelCase123").is_ok());
+        assert!(validate_agent_name("").is_err());
+        assert!(validate_agent_name("a/b").is_err());
+        assert!(validate_agent_name("a\\b").is_err());
+        assert!(validate_agent_name("..").is_err());
+        assert!(validate_agent_name("a b").is_err());
     }
 }

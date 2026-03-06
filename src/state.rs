@@ -171,8 +171,9 @@ impl State {
         self.phases.get_mut(name).expect("unknown phase name")
     }
 
+    #[expect(clippy::expect_used)]
     pub fn phase_status(&self, name: &str) -> &PhaseStatus {
-        &self.phases[name].status
+        &self.phases.get(name).expect("unknown phase name").status
     }
 }
 
@@ -189,7 +190,8 @@ pub fn check_sentinel(target: &Path, phase: &str, state: &State) -> Result<bool>
     match phase {
         "exploration" => {
             let path = kb.join("exploration.md");
-            match std::fs::metadata(&path) {
+            match std::fs::symlink_metadata(&path) {
+                Ok(m) if m.file_type().is_symlink() => Ok(false),
                 Ok(m) => Ok(m.len() > 100),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
                 Err(e) => Err(e).context("checking exploration sentinel"),

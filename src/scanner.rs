@@ -272,7 +272,7 @@ pub fn compute_static_metrics(source: &str) -> StaticMetrics {
         raw_pointer_usage: scale_density(raw_ptr_count, loc_count, 3),
         ffi_declarations: scale_ffi(ffi_count),
         todo_fixme_hack: scale_todo(todo_count),
-        max_nesting_depth: scale_nesting(max_depth as u32),
+        max_nesting_depth: scale_nesting(max_depth.max(0) as u32),
     }
 }
 
