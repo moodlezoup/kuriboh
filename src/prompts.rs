@@ -58,7 +58,7 @@ has already computed static metrics for each file. You need to score 3 semantic
 metrics that require reading the code.
 
 For each file listed below, spawn a **scout** subagent (defined in
-`.claude/agents/scout.md`) with the prompt: "Score this file: <path>"
+`.claude/agents/kuriboh_scout.md`) with the prompt: "Score this file: <path>"
 
 Scouts run in background (parallel), use Haiku, and are read-only.
 
@@ -154,7 +154,7 @@ assignments. Your job is to spawn reviewer teammates and coordinate their work.
 
 ## Reviewer Agent Definition
 
-The full reviewer methodology is defined in `.claude/agents/reviewer.md`
+The full reviewer methodology is defined in `.claude/agents/kuriboh_reviewer.md`
 (frontier-based search, review dimensions, specialist subagent usage, output
 schema, and completion protocol). Each reviewer teammate reads this file.
 Pass ONLY the assignment-specific parameters in your spawn prompts.
@@ -168,7 +168,7 @@ specific N, path, score, lens, and lens_description values):
 
 ---BEGIN REVIEWER SPAWN PROMPT (substitute N, path, score, lens, lens_description)---
 You are reviewer N in a parallel Rust security review. Read your full
-methodology from `.claude/agents/reviewer.md` before starting.
+methodology from `.claude/agents/kuriboh_reviewer.md` before starting.
 
 Repo root: {target}
 ALL paths below are absolute. Always use them as-is, even if you cd elsewhere.
@@ -237,7 +237,7 @@ to use a reserve slot, write `[]` to its findings file
 ## Cross-Reviewer Visibility
 
 Reviewers write findings incrementally to `{target}/.kuriboh/findings/reviewer-N.json`.
-Per their protocol in `.claude/agents/reviewer.md`, reviewers periodically read
+Per their protocol in `.claude/agents/kuriboh_reviewer.md`, reviewers periodically read
 each other's findings files to avoid redundant work and boost related frontier
 items. You do not need to manage this — reviewers handle it autonomously.
 
@@ -279,7 +279,7 @@ pub fn appraisal_and_compilation(reviewer_ids: &[u32], target: &str, max_turns: 
 ## Phase 4: Appraisal
 
 For each completed reviewer below, spawn an **appraiser** subagent (defined in
-`.claude/agents/appraiser.md`) to validate their findings. Appraisers may run
+`.claude/agents/kuriboh_appraiser.md`) to validate their findings. Appraisers may run
 in parallel.
 
 Reviewers:

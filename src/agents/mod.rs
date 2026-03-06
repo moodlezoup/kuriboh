@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
-/// A structured agent definition that will be rendered to `.claude/agents/<name>.md`.
+/// A structured agent definition rendered to `.kuriboh/agents/kuriboh_<name>.md`
+/// and symlinked from `.claude/agents/kuriboh_<name>.md`.
 #[derive(Clone, Debug)]
 pub struct AgentDef {
     pub name: String,
@@ -184,7 +185,7 @@ pub fn install(target: &Path, config: &Option<PathBuf>) -> Result<()> {
         .with_context(|| format!("creating {}", link_dir.display()))?;
 
     for agent in &agents {
-        let filename = format!("{}.md", agent.name);
+        let filename = format!("kuriboh_{}.md", agent.name);
 
         // Write the real file into .kuriboh/agents/.
         let real_path = real_agents_dir.join(&filename);
@@ -447,8 +448,8 @@ mod tests {
         // Every built-in agent should have a symlink in .claude/agents/
         // and a real file in .kuriboh/agents/.
         for agent in templates::builtin_agents() {
-            let link = agents_dir.join(format!("{}.md", agent.name));
-            let real = kuriboh_agents.join(format!("{}.md", agent.name));
+            let link = agents_dir.join(format!("kuriboh_{}.md", agent.name));
+            let real = kuriboh_agents.join(format!("kuriboh_{}.md", agent.name));
 
             assert!(real.exists(), "real file missing for {}", agent.name);
             assert!(
@@ -485,7 +486,9 @@ mod tests {
         // All symlinks should be gone.
         for agent in templates::builtin_agents() {
             assert!(
-                !agents_dir.join(format!("{}.md", agent.name)).exists(),
+                !agents_dir
+                    .join(format!("kuriboh_{}.md", agent.name))
+                    .exists(),
                 "symlink for {} should be removed",
                 agent.name
             );
@@ -526,7 +529,7 @@ mod tests {
         install(target, &None).unwrap();
 
         // Should still work — no "file exists" errors.
-        let link = target.join(".claude/agents/scout.md");
+        let link = target.join(".claude/agents/kuriboh_scout.md");
         assert!(link.symlink_metadata().unwrap().file_type().is_symlink());
     }
 
