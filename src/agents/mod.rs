@@ -180,17 +180,27 @@ pub fn install(target: &Path, config: &Option<PathBuf>) -> Result<()> {
         }
     }
 
+    let mut installed_names: Vec<String> = Vec::new();
     for agent in &agents {
         let dest = agents_dir.join(format!("{}.md", agent.name));
         std::fs::write(&dest, agent.render())
             .with_context(|| format!("writing agent def {}", dest.display()))?;
+        installed_names.push(agent.name.clone());
         tracing::debug!(agent = %agent.name, path = %dest.display(), "Installed agent");
     }
+
+    // Write manifest so cleanup knows exactly which files to remove.
+    let manifest_path = kuriboh_dir.join("installed-agents.json");
+    let manifest_json =
+        serde_json::to_string(&installed_names).context("serializing installed-agents manifest")?;
+    std::fs::write(&manifest_path, manifest_json)
+        .with_context(|| format!("writing {}", manifest_path.display()))?;
 
     Ok(())
 }
 
-/// Remove the `.kuriboh/` workspace directory after a completed run.
+/// Remove the `.kuriboh/` workspace directory and installed agent files after
+/// a completed run.
 ///
 /// Skipped when `--keep-workspace` is set, so users can inspect intermediate
 /// artifacts like `exploration.md`, `scores.json`, worktrees, and PoCs.
@@ -202,6 +212,13 @@ pub fn cleanup(target: &Path) -> Result<()> {
     if !kuriboh_dir.exists() {
         return Ok(());
     }
+
+    // Read the agent manifest before we delete .kuriboh/.
+    let manifest_path = kuriboh_dir.join("installed-agents.json");
+    let installed_agents: Vec<String> = std::fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default();
 
     // Remove any git worktrees created during the review.
     let worktrees_dir = kuriboh_dir.join("worktrees");
@@ -248,7 +265,30 @@ pub fn cleanup(target: &Path) -> Result<()> {
         .with_context(|| format!("cleaning up {}", kuriboh_dir.display()))?;
     tracing::debug!(path = %kuriboh_dir.display(), "Cleaned up .kuriboh workspace");
 
+    // Remove agent files that we installed into .claude/agents/.
+    let agents_dir = target.join(".claude").join("agents");
+    for name in &installed_agents {
+        let path = agents_dir.join(format!("{name}.md"));
+        if path.exists() {
+            std::fs::remove_file(&path)
+                .with_context(|| format!("removing agent file {}", path.display()))?;
+            tracing::debug!(agent = %name, "Removed installed agent");
+        }
+    }
+    // Remove .claude/agents/ and .claude/ if we left them empty.
+    remove_dir_if_empty(&agents_dir);
+    remove_dir_if_empty(&target.join(".claude"));
+
     Ok(())
+}
+
+/// Remove a directory only if it exists and is empty.
+fn remove_dir_if_empty(dir: &Path) {
+    if let Ok(mut entries) = std::fs::read_dir(dir) {
+        if entries.next().is_none() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -337,6 +377,77 @@ mod tests {
 
         let err = apply_config(&mut agents, config).unwrap_err();
         assert!(err.to_string().contains("requires a 'prompt' field"));
+    }
+
+    #[test]
+    fn cleanup_removes_installed_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path();
+
+        // Simulate install: create .claude/agents/ with agent files and manifest.
+        let agents_dir = target.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("scout.md"), "---\nname: scout\n---\n").unwrap();
+        std::fs::write(agents_dir.join("reviewer.md"), "---\nname: reviewer\n---\n").unwrap();
+        // A pre-existing user agent that should NOT be removed.
+        std::fs::write(
+            agents_dir.join("my-custom.md"),
+            "---\nname: my-custom\n---\n",
+        )
+        .unwrap();
+
+        let kuriboh_dir = target.join(".kuriboh");
+        std::fs::create_dir_all(&kuriboh_dir).unwrap();
+        std::fs::write(
+            kuriboh_dir.join("installed-agents.json"),
+            r#"["scout","reviewer"]"#,
+        )
+        .unwrap();
+
+        cleanup(target).unwrap();
+
+        // .kuriboh/ should be gone.
+        assert!(!kuriboh_dir.exists());
+        // Installed agents should be removed.
+        assert!(!agents_dir.join("scout.md").exists());
+        assert!(!agents_dir.join("reviewer.md").exists());
+        // User's agent should still be there.
+        assert!(agents_dir.join("my-custom.md").exists());
+        // .claude/agents/ should NOT be removed (still has user's file).
+        assert!(agents_dir.exists());
+    }
+
+    #[test]
+    fn cleanup_removes_empty_claude_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path();
+
+        let agents_dir = target.join(".claude/agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(agents_dir.join("scout.md"), "agent").unwrap();
+
+        let kuriboh_dir = target.join(".kuriboh");
+        std::fs::create_dir_all(&kuriboh_dir).unwrap();
+        std::fs::write(kuriboh_dir.join("installed-agents.json"), r#"["scout"]"#).unwrap();
+
+        cleanup(target).unwrap();
+
+        // Both .claude/agents/ and .claude/ should be removed (empty).
+        assert!(!agents_dir.exists());
+        assert!(!target.join(".claude").exists());
+    }
+
+    #[test]
+    fn cleanup_tolerates_missing_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path();
+
+        let kuriboh_dir = target.join(".kuriboh");
+        std::fs::create_dir_all(&kuriboh_dir).unwrap();
+        // No manifest file — should not error.
+
+        cleanup(target).unwrap();
+        assert!(!kuriboh_dir.exists());
     }
 
     #[test]
