@@ -110,4 +110,4 @@ src/
 
 ## License
 
-TBD
+MIT

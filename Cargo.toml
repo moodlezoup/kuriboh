@@ -3,6 +3,7 @@ name = "kuriboh"
 version = "0.1.0"
 edition = "2021"
 description = "A Claude Code harness for automated security reviews of Rust codebases"
+license = "MIT"
 
 [[bin]]
 name = "kuriboh"
