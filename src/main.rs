@@ -82,6 +82,21 @@ async fn main() -> Result<()> {
     // === Phase 3: Deep Review ===
     run_phase(&mut state, &args, "deep_review").await?;
 
+    // Pre-deduplicate findings across reviewers (Rust-side, before appraisal).
+    match report::pre_deduplicate_findings(&args.target) {
+        Ok((before, after)) if before > 0 => {
+            let removed = before - after;
+            info!(
+                before,
+                after, removed, "Pre-deduplicated findings across reviewers"
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(err = %e, "Pre-dedup failed, continuing with raw findings");
+        }
+    }
+
     // === Phase 4+5: Appraisal & Compilation ===
     run_phase(&mut state, &args, "appraisal_compilation").await?;
 

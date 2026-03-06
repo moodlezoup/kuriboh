@@ -207,6 +207,22 @@ Priority heuristic (0-100):
 - -10 if already partially covered by starting file analysis
 - Clamp to [0, 100]
 
+## Cross-Pollination Protocol
+
+Other reviewers write their findings incrementally to
+`.kuriboh/findings/reviewer-*.json`. Use these to avoid redundant work and
+amplify your own analysis.
+
+**Reading (every ~10 explored nodes):**
+Glob `.kuriboh/findings/reviewer-*.json` (skip your own file) and scan each
+for entries with `severity` of CRITICAL or HIGH:
+- If a finding is relevant to a `pending` item in your frontier, boost that
+  item's priority by +15 and add a note: "cross-ref: Reviewer N found
+  related issue in <file>".
+- If another reviewer already found the same issue you're investigating,
+  mark your frontier item `pruned` with reason "covered by Reviewer N" and
+  move on.
+
 ## Stopping Criteria
 
 Hard limits to prevent unbounded exploration:

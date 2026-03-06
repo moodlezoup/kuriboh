@@ -218,6 +218,131 @@ fn render_finding(out: &mut String, f: &Finding) {
     out.push('\n');
 }
 
+/// Pre-deduplicate findings across all reviewers before appraisal.
+///
+/// Reads every `findings/reviewer-*.json`, groups findings by a normalized key
+/// `(file_stem, lowercase_title)`, keeps the best version per group (highest
+/// severity, then longest description), and writes the deduplicated arrays back
+/// to each reviewer's file. Returns `(total_before, total_after)`.
+pub fn pre_deduplicate_findings(target: &Path) -> Result<(usize, usize)> {
+    let findings_dir = target.join(".kuriboh/findings");
+    if !findings_dir.exists() {
+        return Ok((0, 0));
+    }
+
+    // Collect all (reviewer_id, finding) pairs.
+    let mut all: Vec<(u32, Finding)> = Vec::new();
+    let mut reviewer_files: Vec<(u32, std::path::PathBuf)> = Vec::new();
+
+    for entry in std::fs::read_dir(&findings_dir)
+        .with_context(|| format!("reading {}", findings_dir.display()))?
+        .flatten()
+    {
+        let path = entry.path();
+        let fname = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+        // Match reviewer-N.json but NOT appraised-N.json
+        let id = match fname
+            .strip_prefix("reviewer-")
+            .and_then(|s| s.strip_suffix(".json"))
+        {
+            Some(s) => match s.parse::<u32>() {
+                Ok(id) => id,
+                Err(_) => continue,
+            },
+            None => continue,
+        };
+
+        let data = std::fs::read_to_string(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let findings: Vec<Finding> = match serde_json::from_str(&data) {
+            Ok(f) => f,
+            Err(_) => continue, // malformed — skip, appraisal will handle it
+        };
+        for f in findings {
+            all.push((id, f));
+        }
+        reviewer_files.push((id, path));
+    }
+
+    let total_before = all.len();
+    if total_before == 0 {
+        return Ok((0, 0));
+    }
+
+    // Group by normalized (file_stem, title) key.
+    let mut groups: std::collections::HashMap<(String, String), Vec<(u32, Finding)>> =
+        std::collections::HashMap::new();
+    for (rid, finding) in all {
+        let key = dedup_key(&finding);
+        groups.entry(key).or_default().push((rid, finding));
+    }
+
+    // For each group, pick the winner: highest severity, then longest description.
+    let mut kept: std::collections::HashMap<u32, Vec<Finding>> = std::collections::HashMap::new();
+    for (_key, mut group) in groups {
+        // Sort: lowest Severity enum value = highest severity (Critical < High < ... < Info).
+        group.sort_by(|a, b| {
+            a.1.severity
+                .cmp(&b.1.severity)
+                .then_with(|| b.1.description.len().cmp(&a.1.description.len()))
+        });
+        let (winner_id, mut winner) = group.remove(0);
+        if !group.is_empty() {
+            // Record how many independent reviewers found this.
+            let reviewer_count = {
+                let mut ids: Vec<u32> = vec![winner_id];
+                ids.extend(group.iter().map(|(rid, _)| *rid));
+                ids.sort_unstable();
+                ids.dedup();
+                ids.len() as u32
+            };
+            if winner.independent_reviewers.unwrap_or(0) < reviewer_count {
+                winner.independent_reviewers = Some(reviewer_count);
+            }
+        }
+        kept.entry(winner_id).or_default().push(winner);
+    }
+
+    // Write back deduplicated findings per reviewer.
+    for (id, path) in &reviewer_files {
+        let findings = kept.remove(id).unwrap_or_default();
+        let json = serde_json::to_string_pretty(&findings)
+            .with_context(|| format!("serializing deduped findings for reviewer {id}"))?;
+        std::fs::write(path, json)
+            .with_context(|| format!("writing deduped {}", path.display()))?;
+    }
+
+    // Recount from what we wrote back.
+    let mut total_after = 0usize;
+    for (_id, path) in &reviewer_files {
+        let data = std::fs::read_to_string(path).unwrap_or_default();
+        let findings: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
+        total_after += findings.len();
+    }
+
+    Ok((total_before, total_after))
+}
+
+/// Compute the dedup key for a finding: (file_stem, normalized_title).
+///
+/// `file_stem` strips `:line` suffixes so `foo.rs:42` and `foo.rs:50` with the
+/// same title are considered duplicates.
+fn dedup_key(f: &Finding) -> (String, String) {
+    let file_stem = f
+        .file
+        .as_deref()
+        .unwrap_or("")
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .to_string();
+    let title = f.title.trim().to_lowercase();
+    (file_stem, title)
+}
+
 /// Build a report by reading workspace artifacts directly (no event stream).
 ///
 /// This is used when the Rust harness drives each phase individually
@@ -465,6 +590,145 @@ Needs review stuff.";
         assert!(md.contains("**Scout Score**: 75"));
         assert!(md.contains("**Call Chain**: a.rs:fn_a -> b.rs:fn_b"));
         assert!(md.contains("$1.5"));
+    }
+
+    #[test]
+    fn pre_dedup_removes_duplicates() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings_dir = dir.path().join(".kuriboh/findings");
+        std::fs::create_dir_all(&findings_dir).unwrap();
+
+        // Reviewer 1: HIGH buffer overflow in foo.rs
+        let r1 = serde_json::json!([{
+            "severity": "HIGH",
+            "title": "Buffer overflow",
+            "file": "src/foo.rs:42",
+            "description": "Writes past buffer end via unchecked index",
+            "recommendation": "Add bounds check"
+        }]);
+        std::fs::write(
+            findings_dir.join("reviewer-1.json"),
+            serde_json::to_string(&r1).unwrap(),
+        )
+        .unwrap();
+
+        // Reviewer 2: same finding (different line) + a unique finding
+        let r2 = serde_json::json!([
+            {
+                "severity": "MEDIUM",
+                "title": "Buffer overflow",
+                "file": "src/foo.rs:50",
+                "description": "Short desc",
+                "recommendation": "Fix it"
+            },
+            {
+                "severity": "LOW",
+                "title": "Missing error handling",
+                "file": "src/bar.rs:10",
+                "description": "Unwrap on network input",
+                "recommendation": "Use ?"
+            }
+        ]);
+        std::fs::write(
+            findings_dir.join("reviewer-2.json"),
+            serde_json::to_string(&r2).unwrap(),
+        )
+        .unwrap();
+
+        let (before, after) = pre_deduplicate_findings(dir.path()).unwrap();
+        assert_eq!(before, 3);
+        assert_eq!(after, 2); // one duplicate removed
+
+        // The kept buffer overflow should be the HIGH one (higher severity).
+        let r1_data = std::fs::read_to_string(findings_dir.join("reviewer-1.json")).unwrap();
+        let r1_findings: Vec<Finding> = serde_json::from_str(&r1_data).unwrap();
+        assert_eq!(r1_findings.len(), 1);
+        assert_eq!(r1_findings[0].severity, Severity::High);
+        assert_eq!(r1_findings[0].independent_reviewers, Some(2));
+
+        // Reviewer 2 keeps only the unique finding.
+        let r2_data = std::fs::read_to_string(findings_dir.join("reviewer-2.json")).unwrap();
+        let r2_findings: Vec<Finding> = serde_json::from_str(&r2_data).unwrap();
+        assert_eq!(r2_findings.len(), 1);
+        assert_eq!(r2_findings[0].title, "Missing error handling");
+    }
+
+    #[test]
+    fn pre_dedup_no_findings_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let (before, after) = pre_deduplicate_findings(dir.path()).unwrap();
+        assert_eq!(before, 0);
+        assert_eq!(after, 0);
+    }
+
+    #[test]
+    fn pre_dedup_empty_findings() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings_dir = dir.path().join(".kuriboh/findings");
+        std::fs::create_dir_all(&findings_dir).unwrap();
+        std::fs::write(findings_dir.join("reviewer-1.json"), "[]").unwrap();
+
+        let (before, after) = pre_deduplicate_findings(dir.path()).unwrap();
+        assert_eq!(before, 0);
+        assert_eq!(after, 0);
+    }
+
+    #[test]
+    fn pre_dedup_skips_appraised_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings_dir = dir.path().join(".kuriboh/findings");
+        std::fs::create_dir_all(&findings_dir).unwrap();
+
+        let finding = serde_json::json!([{
+            "severity": "HIGH",
+            "title": "Test",
+            "description": "desc",
+            "recommendation": "fix"
+        }]);
+        std::fs::write(
+            findings_dir.join("reviewer-1.json"),
+            serde_json::to_string(&finding).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            findings_dir.join("appraised-1.json"),
+            serde_json::to_string(&finding).unwrap(),
+        )
+        .unwrap();
+
+        let (before, after) = pre_deduplicate_findings(dir.path()).unwrap();
+        assert_eq!(before, 1);
+        assert_eq!(after, 1);
+    }
+
+    #[test]
+    fn dedup_key_strips_line_numbers() {
+        let f = Finding {
+            severity: Severity::High,
+            title: " Buffer Overflow ".into(),
+            file: Some("src/foo.rs:42".into()),
+            description: String::new(),
+            recommendation: String::new(),
+            source_agent: None,
+            scout_score: None,
+            call_chain: vec![],
+            reachability: None,
+            evidence: None,
+            exploit_sketch: None,
+            repro_status: None,
+            poc_available: false,
+            poc_validated: None,
+            poc_path: None,
+            original_severity: None,
+            verdict: None,
+            appraiser_notes: None,
+            independent_reviewers: None,
+        };
+        let key = super::dedup_key(&f);
+        assert_eq!(
+            key,
+            ("src/foo.rs".to_string(), "buffer overflow".to_string())
+        );
     }
 
     #[test]

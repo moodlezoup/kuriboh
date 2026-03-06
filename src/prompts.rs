@@ -234,6 +234,18 @@ unexplored leads across all primary reviewers.
 to use a reserve slot, write `[]` to its findings file
 (`{target}/.kuriboh/findings/reviewer-N.json`).
 
+## Cross-Reviewer Visibility
+
+Reviewers write findings incrementally to `{target}/.kuriboh/findings/reviewer-N.json`.
+Per their protocol in `.claude/agents/reviewer.md`, reviewers periodically read
+each other's findings files to avoid redundant work and boost related frontier
+items. You do not need to manage this — reviewers handle it autonomously.
+
+When reading frontiers for reserve allocation, also scan
+`{target}/.kuriboh/findings/reviewer-*.json` for HIGH/CRITICAL clusters.
+Concentrations in the same module are strong signals for spawning a reserve
+reviewer targeting that area.
+
 **Wait for all primary and any spawned reserve reviewer teammates to send their
 completion messages** before reporting that Phase 3 is complete.
 
