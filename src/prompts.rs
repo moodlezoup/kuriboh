@@ -332,14 +332,6 @@ as a JSON array using this schema:
 ]
 ```
 
-Also write a final Markdown report as the session output with sections:
-- Executive Summary
-- Scouting Overview
-- Review Coverage
-- Findings (sorted CRITICAL -> INFO)
-- Needs Review
-- Remediation Roadmap
-
 Target codebase: {target}
 Max turns: {max_turns}"#
     )

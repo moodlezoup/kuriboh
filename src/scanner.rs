@@ -97,9 +97,107 @@ pub struct FileScore {
     pub top_concerns: Vec<String>,
 }
 
+/// Classify each line as code (`true`) or non-code (`false`).
+///
+/// Non-code = single-line comment, inside a block comment, or inside a
+/// multi-line raw string literal. Lines that *open* a raw string are still
+/// counted as code (they contain the `let x = r#"` assignment); only
+/// continuation lines are excluded.
+fn code_line_mask(lines: &[&str]) -> Vec<bool> {
+    let mut mask = Vec::with_capacity(lines.len());
+    let mut in_block_comment = false;
+    let mut raw_closer: Option<String> = None; // expected closing delimiter
+
+    for line in lines {
+        let trimmed = line.trim();
+
+        // Continuation of a multi-line raw string?
+        if let Some(ref closer) = raw_closer {
+            if line.contains(closer.as_str()) {
+                raw_closer = None;
+            }
+            mask.push(false);
+            continue;
+        }
+
+        // Inside a block comment?
+        if in_block_comment {
+            if trimmed.contains("*/") {
+                in_block_comment = false;
+            }
+            mask.push(false);
+            continue;
+        }
+
+        // Single-line comment?
+        if trimmed.starts_with("//") {
+            mask.push(false);
+            continue;
+        }
+
+        // Block comment (single-line or multi-line opening)?
+        if trimmed.starts_with("/*") {
+            if !trimmed.contains("*/") {
+                in_block_comment = true;
+            }
+            mask.push(false);
+            continue;
+        }
+
+        // Check for a raw string that opens on this line but doesn't close.
+        raw_closer = find_unclosed_raw_string(line);
+
+        // The opening line itself is code (e.g. `let x = r#"...`).
+        mask.push(true);
+    }
+
+    mask
+}
+
+/// If `line` opens a multi-line raw string, return the expected closing
+/// delimiter (e.g. `"#` for `r#"`). Returns `None` if no unclosed raw
+/// string is found.
+fn find_unclosed_raw_string(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let mut i = 0;
+    while i < bytes.len().saturating_sub(1) {
+        if bytes[i] == b'r' && (bytes[i + 1] == b'#' || bytes[i + 1] == b'"') {
+            // Ensure 'r' is not part of an identifier (preceded by alphanumeric/_)
+            if i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_') {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            let mut hashes = 0;
+            while j < bytes.len() && bytes[j] == b'#' {
+                hashes += 1;
+                j += 1;
+            }
+            if j < bytes.len() && bytes[j] == b'"' {
+                // Found r[#*]" — check if it closes on the same line
+                let content_start = j + 1;
+                let closer = format!("\"{}", "#".repeat(hashes));
+                let closes_here =
+                    content_start < bytes.len() && line[content_start..].contains(&closer);
+                if !closes_here {
+                    return Some(closer);
+                }
+                // Skip past the closing delimiter to avoid re-matching
+                if let Some(pos) = line[content_start..].find(&closer) {
+                    i = content_start + pos + closer.len();
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Compute static metrics for a single file from its source text.
 pub fn compute_static_metrics(source: &str) -> StaticMetrics {
     let lines: Vec<&str> = source.lines().collect();
+    let is_code = code_line_mask(&lines);
 
     let loc_count = lines
         .iter()
@@ -111,26 +209,37 @@ pub fn compute_static_metrics(source: &str) -> StaticMetrics {
 
     let unsafe_count = lines
         .iter()
-        .filter(|l| l.contains("unsafe ") || l.contains("unsafe{"))
+        .zip(&is_code)
+        .filter(|(l, code)| **code && (l.contains("unsafe ") || l.contains("unsafe{")))
         .count();
     let unwrap_count = lines
         .iter()
-        .filter(|l| l.contains(".unwrap()") || l.contains(".expect("))
+        .zip(&is_code)
+        .filter(|(l, code)| **code && (l.contains(".unwrap()") || l.contains(".expect(")))
         .count();
     let raw_ptr_count = lines
         .iter()
-        .filter(|l| l.contains("*mut ") || l.contains("*const "))
+        .zip(&is_code)
+        .filter(|(l, code)| **code && (l.contains("*mut ") || l.contains("*const ")))
         .count();
     let ffi_count = lines
         .iter()
-        .filter(|l| {
+        .zip(&is_code)
+        .filter(|(l, code)| {
+            if !**code {
+                return false;
+            }
             let t = l.trim();
             t.starts_with("extern ") || t.contains("extern \"C\"") || t.contains("extern \"c\"")
         })
         .count();
     let todo_count = lines
         .iter()
-        .filter(|l| {
+        .zip(&is_code)
+        .filter(|(l, code)| {
+            if !**code {
+                return false;
+            }
             let upper = l.to_uppercase();
             upper.contains("TODO") || upper.contains("FIXME") || upper.contains("HACK")
         })
@@ -138,7 +247,10 @@ pub fn compute_static_metrics(source: &str) -> StaticMetrics {
 
     let mut max_depth: i32 = 0;
     let mut depth: i32 = 0;
-    for line in &lines {
+    for (line, code) in lines.iter().zip(&is_code) {
+        if !code {
+            continue;
+        }
         for ch in line.chars() {
             match ch {
                 '{' => {
@@ -548,7 +660,7 @@ unsafe fn danger() {
     let p: *mut u8 = std::ptr::null_mut();
 }
 
-// TODO: fix this
+fn todo_marker() { todo!("TODO: fix this") }
 "#,
         );
         // Pad to exceed the 50-line LOC threshold.
@@ -873,5 +985,77 @@ unsafe fn danger() {
         let scores = merge_scores(&static_scores, &HashMap::new());
         assert_eq!(scores[0].combination_bonus, 10);
         assert!(scores[0].weighted_score > 0);
+    }
+
+    #[test]
+    fn static_metrics_ignores_raw_string_content() {
+        let source = r####"
+fn build_prompt() -> String {
+    let s = r#"
+        Check for unsafe blocks and raw pointers.
+        unsafe fn danger() { let p: *mut u8 = std::ptr::null_mut(); }
+        TODO: fix this hack
+        extern "C" fn ffi_call() {}
+        let x = foo().unwrap();
+    "#;
+    s.to_string()
+}
+fn stub_0() {}
+fn stub_1() {}
+"####;
+        // Pad source to exceed 50-line LOC threshold
+        let mut padded = source.to_string();
+        for i in 0..50 {
+            padded.push_str(&format!("fn pad_{i}() {{}}\n"));
+        }
+
+        let m = compute_static_metrics(&padded);
+        assert_eq!(
+            m.unsafe_density, 0,
+            "should not detect unsafe in raw string"
+        );
+        assert_eq!(
+            m.unwrap_density, 0,
+            "should not detect unwrap in raw string"
+        );
+        assert_eq!(
+            m.raw_pointer_usage, 0,
+            "should not detect *mut in raw string"
+        );
+        assert_eq!(
+            m.ffi_declarations, 0,
+            "should not detect extern in raw string"
+        );
+        assert_eq!(m.todo_fixme_hack, 0, "should not detect TODO in raw string");
+    }
+
+    #[test]
+    fn static_metrics_ignores_comments() {
+        let mut source = String::from(
+            "// unsafe fn danger() { let p: *mut u8 = std::ptr::null_mut(); }\n\
+             /* TODO: fix this unsafe hack */\n\
+             fn safe_code() {}\n",
+        );
+        for i in 0..50 {
+            source.push_str(&format!("fn pad_{i}() {{}}\n"));
+        }
+        let m = compute_static_metrics(&source);
+        assert_eq!(m.unsafe_density, 0);
+        assert_eq!(m.todo_fixme_hack, 0);
+    }
+
+    #[test]
+    fn code_line_mask_basic() {
+        let lines = vec![
+            "fn main() {",           // code
+            "    // comment",        // non-code
+            "    let x = r#\"",      // code (opens raw string)
+            "    unsafe block",      // non-code (inside raw string)
+            "    \"#;",              // non-code (closes raw string)
+            "    println!(\"hi\");", // code
+            "}",                     // code
+        ];
+        let mask = code_line_mask(&lines);
+        assert_eq!(mask, vec![true, false, true, false, false, true, true]);
     }
 }

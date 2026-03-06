@@ -326,8 +326,8 @@ Then shut down."#
             tools: "Read, Glob, Grep, Bash, Write".into(),
             disallowed_tools: Some("Edit, NotebookEdit".into()),
             model: "sonnet".into(),
-            background: false,
-            max_turns: Some(20),
+            background: true,
+            max_turns: Some(16),
             permission_mode: None,
             prompt: r#"You are a security finding appraiser. Your job is to validate the work of a
 code reviewer and ensure only genuine, accurately-rated findings survive.
@@ -417,13 +417,6 @@ Write appraised findings to your assigned output path as a JSON array:
   }
 ]
 ```
-
-## Worktree Cleanup
-
-After appraisal:
-- If ALL findings were rejected (no valid bugs), remove the git worktree:
-  `git worktree remove .kuriboh/worktrees/reviewer-N --force`
-- If ANY findings were confirmed or need review, keep the worktree intact.
 
 Report completion with a summary: N confirmed, N adjusted, N rejected, N needs-review."#
                 .into(),
