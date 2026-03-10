@@ -466,11 +466,29 @@ async fn run_appraisal_compilation(state: &mut State, args: &cli::Args) -> Resul
 
 #[expect(clippy::print_stdout)]
 fn print_estimate(args: &cli::Args) {
-    let file_list = scanner::enumerate_files(&args.target, false).unwrap_or_default();
-    let file_count = file_list.len();
-    let reviewers = args
-        .reviewers
-        .unwrap_or_else(|| scanner::default_reviewer_count(file_count));
+    let (file_count, reviewers, mode_label) = if let Some(ref range) = args.diff {
+        match diff::resolve_diff(&args.target, range) {
+            Ok(ctx) => {
+                let count = ctx.files.len();
+                let r = args
+                    .reviewers
+                    .unwrap_or_else(|| scanner::default_reviewer_count_diff(count));
+                (count, r, format!("diff ({range})"))
+            }
+            Err(e) => {
+                println!("Error resolving diff: {e}");
+                return;
+            }
+        }
+    } else {
+        let file_list = scanner::enumerate_files(&args.target, false).unwrap_or_default();
+        let count = file_list.len();
+        let r = args
+            .reviewers
+            .unwrap_or_else(|| scanner::default_reviewer_count(count));
+        (count, r, "full codebase".to_string())
+    };
+
     let reserves = scanner::compute_reserve_count(reviewers);
     let total_reviewers = reviewers + reserves;
 
@@ -494,6 +512,7 @@ fn print_estimate(args: &cli::Args) {
     println!("=====================");
     println!();
     println!("Target:       {}", args.target.display());
+    println!("Mode:         {mode_label}");
     println!("Rust files:   {file_count}");
     println!("Model:        {} (lead: claude-opus-4-6)", args.model);
     println!("Reviewers:    {reviewers} (+{reserves} reserve)");
