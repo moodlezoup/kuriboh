@@ -18,6 +18,12 @@ kuriboh --target /path/to/crate --resume
 
 # Reproducible task assignments
 kuriboh --target /path/to/crate --seed 42
+
+# Review changes between two commits
+kuriboh --target /path/to/crate --diff main..feature --dangerously-skip-permissions
+
+# Estimate cost for diff review
+kuriboh --target /path/to/crate --diff main..feature --estimate
 ```
 
 Run `cargo test` to execute tests. Verify changes with `cargo build` (must produce 0 errors, 0 warnings).
@@ -45,10 +51,13 @@ main.rs phase loop:
 
 4 Claude Code sessions total. Rust handles all deterministic work (file enumeration, static metrics, score merging, task assignment, worktree creation, sentinel checking, report generation). Claude handles semantic judgment only.
 
+With `--diff base..head`: scouting/review scope narrows to changed `.rs` files only; diff hunks are injected into reviewer prompts. Worktrees use detached HEAD at the `head` ref.
+
 ### Key modules
 
 - `main.rs` -- Phase loop: iterates phases, checks sentinels via `state::check_sentinel()`, manages `PhaseStatus` transitions, persists state after each phase. Contains per-phase async functions (`run_exploration`, `run_scouting`, `run_deep_review`, `run_appraisal_compilation`).
-- `state.rs` -- `State` struct persisted to `.kuriboh/state.json`. `PhaseStatus` enum (Pending/Running/Done/Failed). `check_sentinel()` validates phase outputs. Atomic save via tmp+rename.
+- `state.rs` -- `State` struct persisted to `.kuriboh/state.json`. `PhaseStatus` enum (Pending/Running/Done/Failed). `ReviewMode` enum (Full/Diff) with `FileStatus` and `DiffFile` types. `check_sentinel()` validates phase outputs. Atomic save via tmp+rename.
+- `diff.rs` -- Git diff extraction: `resolve_diff()` parses `--diff base..head` range, extracts changed `.rs` files via `git diff --name-status`, collects unified diff hunks. `DiffContext` struct holds files + hunks. Rejects three-dot syntax, applies same SKIP_DIRS as scanner.
 - `scanner.rs` -- File enumeration (`enumerate_files`), 7 static metrics (`compute_static_metrics`), LLM score loading/merging (`load_llm_scores`, `merge_scores`), weighted scoring (`compute_weighted_score`), seeded task assignment (`generate_assignments`), reviewer count calculation.
 - `prompts.rs` -- Per-phase prompt builders: `exploration()`, `llm_scouting()`, `deep_review()`, `appraisal_and_compilation()`. Each returns a focused single-phase prompt.
 - `runner.rs` -- Generic Claude Code session spawner. `run_session(args, SessionOpts)` takes a prompt and `agent_teams` flag. Streams NDJSON events.
@@ -56,7 +65,7 @@ main.rs phase loop:
 - `agents/templates.rs` -- 5 subagent definitions: scout (3 LLM metrics only), appraiser, unsafe-auditor, dep-checker, crypto-reviewer.
 - `agents/mod.rs` -- `BUILTIN_AGENTS` registry, `install()` writes `.claude/agents/*.md`, `cleanup()` handles worktree removal then deletes `.kuriboh/`.
 - `report.rs` -- `Report` and `Finding` structs. `parse_from_workspace()` reads compiled-findings.json directly. Renders Markdown or JSON.
-- `cli.rs` -- clap-derived Args. Notable: `--reviewers`, `--max-turns` (400), `--resume`, `--seed`, `--keep-workspace`, `--dangerously-skip-permissions`, `--verbose`, `--estimate`.
+- `cli.rs` -- clap-derived Args. Notable: `--reviewers`, `--max-turns` (400), `--resume`, `--seed`, `--keep-workspace`, `--dangerously-skip-permissions`, `--verbose`, `--estimate`, `--diff <base..head>`.
 
 ### `.kuriboh/` workspace layout
 
