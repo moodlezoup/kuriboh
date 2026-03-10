@@ -49,6 +49,20 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // Resolve diff context if --diff was provided.
+    let diff_ctx = if let Some(ref range) = args.diff {
+        let ctx = diff::resolve_diff(&args.target, range)?;
+        info!(
+            base = %ctx.base,
+            head = %ctx.head,
+            changed_files = ctx.files.len(),
+            "Diff mode: reviewing changes"
+        );
+        Some(ctx)
+    } else {
+        None
+    };
+
     info!(target = %args.target.display(), "Starting kuriboh security review");
 
     // Install subagent definitions.
@@ -68,7 +82,38 @@ async fn main() -> Result<()> {
         s
     } else {
         let seed = args.seed.unwrap_or_else(rand::random);
-        State::new(args.target.clone(), seed)
+        let mut s = State::new(args.target.clone(), seed);
+        if let Some(ref ctx) = diff_ctx {
+            s.mode = state::ReviewMode::Diff {
+                base: ctx.base.clone(),
+                head: ctx.head.clone(),
+                changed_files: ctx.files.clone(),
+            };
+        }
+        s
+    };
+
+    // Validate --diff and --resume mode consistency.
+    if args.resume {
+        match (&state.mode, &args.diff) {
+            (state::ReviewMode::Full, Some(_)) => {
+                bail!("Cannot use --diff with --resume on a full-mode review. Start a new review with --diff instead.");
+            }
+            _ => {} // matching modes or resuming diff without --diff (mode is in state)
+        }
+    }
+
+    // If resuming a diff review, re-derive hunks from git (not stored in state).
+    let diff_ctx = if diff_ctx.is_none() {
+        match &state.mode {
+            state::ReviewMode::Diff { base, head, .. } => {
+                let range = format!("{base}..{head}");
+                Some(diff::resolve_diff(&args.target, &range)?)
+            }
+            state::ReviewMode::Full => None,
+        }
+    } else {
+        diff_ctx
     };
 
     // Save initial state so --resume can find it even if we crash in phase 1.
