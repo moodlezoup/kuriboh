@@ -1,14 +1,68 @@
 use crate::state::{DiffFile, FileStatus, TaskAssignment};
 use std::collections::HashMap;
 
+/// Context from diff/PR mode passed to the exploration prompt.
+pub struct ExplorationDiffContext {
+    pub base: String,
+    pub head: String,
+    pub changed_files: Vec<DiffFile>,
+    pub commit_log: String,
+    pub pr_context: Option<String>,
+}
+
 /// Phase 1: Exploration prompt. Focused on codebase survey only.
-pub fn exploration(target: &str, user_guidance: Option<&str>) -> String {
+pub fn exploration(
+    target: &str,
+    user_guidance: Option<&str>,
+    diff_ctx: Option<&ExplorationDiffContext>,
+) -> String {
     let guidance = match user_guidance {
         Some(g) => format!(
             "\n\nUSER GUIDANCE:\n{g}\n\nPay special attention to the areas mentioned above during exploration."
         ),
         None => String::new(),
     };
+
+    let diff_section = match diff_ctx {
+        Some(ctx) => {
+            let mut section = format!(
+                "\n\n## Diff Context\n\n\
+                This review focuses on changes between `{}..{}`.\n\n\
+                ### Changed Files\n\n",
+                ctx.base, ctx.head
+            );
+            for f in &ctx.changed_files {
+                let status_label = match &f.status {
+                    FileStatus::Added => "ADDED",
+                    FileStatus::Modified => "MODIFIED",
+                    FileStatus::Deleted => "DELETED",
+                    FileStatus::Renamed { .. } => "RENAMED",
+                };
+                section.push_str(&format!("- `{}` [{}]\n", f.path, status_label));
+            }
+
+            if !ctx.commit_log.is_empty() {
+                section.push_str(&format!(
+                    "\n### Commit Messages\n\n```\n{}\n```\n",
+                    ctx.commit_log
+                ));
+            }
+
+            if let Some(pr) = &ctx.pr_context {
+                section.push_str(&format!("\n### Pull Request Description\n\n{pr}\n"));
+            }
+
+            section.push_str(
+                "\nDuring exploration, pay special attention to the changed files and their \
+                surroundings. Understanding the architectural context of these changes is \
+                critical for the review phases that follow.\n",
+            );
+
+            section
+        }
+        None => String::new(),
+    };
+
     format!(
         r"You are performing Phase 1 (Exploration) of a security review for a Rust codebase.
 
@@ -41,7 +95,7 @@ Write the results to `{target}/.kuriboh/exploration.md`:
 <anything that stood out during exploration>
 ```
 
-Target codebase: {target}{guidance}"
+Target codebase: {target}{guidance}{diff_section}"
     )
 }
 

@@ -14,6 +14,10 @@ pub struct DiffContext {
     pub head: String,
     pub files: Vec<DiffFile>,
     pub hunks: HashMap<String, String>,
+    /// Commit messages between base and head.
+    pub commit_log: String,
+    /// PR description and comments (only set via `--pr`).
+    pub pr_context: Option<String>,
 }
 
 /// Parse a git range string like "main..feature" into (base, head).
@@ -125,12 +129,40 @@ pub fn resolve_diff(target: &Path, range: &str) -> Result<DiffContext> {
     // Split the full diff into per-file hunks.
     let hunks = split_diff_by_file(&full_diff);
 
+    // Fetch commit messages between base and head.
+    let commit_log = fetch_commit_log(target, &base, &head);
+
     Ok(DiffContext {
         base,
         head,
         files,
         hunks,
+        commit_log,
+        pr_context: None,
     })
+}
+
+/// Fetch commit messages between two refs via `git log`.
+fn fetch_commit_log(target: &Path, base: &str, head: &str) -> String {
+    std::process::Command::new("git")
+        .args([
+            "log",
+            "--oneline",
+            "--no-decorate",
+            &format!("{base}..{head}"),
+        ])
+        .current_dir(target)
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout).ok()
+            } else {
+                None
+            }
+        })
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
 }
 
 /// Parse a `--pr` value into a PR number.
@@ -184,7 +216,40 @@ pub fn resolve_pr(target: &Path, pr_input: &str) -> Result<DiffContext> {
         bail!("Unexpected output from `gh pr view` for PR #{pr_number}: {range:?}");
     }
 
-    resolve_diff(target, &range)
+    let mut ctx = resolve_diff(target, &range)?;
+
+    // Fetch PR description and comments.
+    ctx.pr_context = fetch_pr_context(target, pr_number);
+
+    Ok(ctx)
+}
+
+/// Fetch PR title, body, and comments via `gh`.
+fn fetch_pr_context(target: &Path, pr_number: u32) -> Option<String> {
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "title,body,comments",
+            "--jq",
+            r##""# " + .title + "\n\n" + .body + "\n\n## Comments\n\n" + ([.comments[] | "**" + .author.login + "**: " + .body] | join("\n\n"))"##,
+        ])
+        .current_dir(target)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let text = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
 }
 
 /// Split a unified diff into per-file sections.

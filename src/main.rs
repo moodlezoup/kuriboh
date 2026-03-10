@@ -193,7 +193,7 @@ async fn run_phase(
     state.save(&args.target)?;
 
     let result = match phase_name {
-        "exploration" => run_exploration(state, args).await,
+        "exploration" => run_exploration(state, args, diff_ctx).await,
         "scouting" => run_scouting(state, args).await,
         "deep_review" => run_deep_review(state, args, diff_ctx).await,
         "appraisal_compilation" => run_appraisal_compilation(state, args).await,
@@ -225,8 +225,25 @@ async fn run_phase(
 
 // --- Phase implementations ---
 
-async fn run_exploration(state: &mut State, args: &cli::Args) -> Result<()> {
-    let prompt = prompts::exploration(&args.target.display().to_string(), args.prompt.as_deref());
+async fn run_exploration(
+    state: &mut State,
+    args: &cli::Args,
+    diff_ctx: &Option<diff::DiffContext>,
+) -> Result<()> {
+    let exploration_diff = diff_ctx
+        .as_ref()
+        .map(|ctx| prompts::ExplorationDiffContext {
+            base: ctx.base.clone(),
+            head: ctx.head.clone(),
+            changed_files: ctx.files.clone(),
+            commit_log: ctx.commit_log.clone(),
+            pr_context: ctx.pr_context.clone(),
+        });
+    let prompt = prompts::exploration(
+        &args.target.display().to_string(),
+        args.prompt.as_deref(),
+        exploration_diff.as_ref(),
+    );
     let events = runner::run_session(
         args,
         &runner::SessionOpts {
