@@ -110,8 +110,17 @@ pub struct Args {
     /// abc123..def456). Only .rs files changed in the range are scored
     /// and assigned to reviewers. Reviewers receive diff hunks to
     /// focus their analysis.
-    #[arg(long, value_name = "RANGE")]
+    #[arg(long, value_name = "RANGE", conflicts_with = "pr")]
     pub diff: Option<String>,
+
+    /// Focus review on a GitHub pull request.
+    ///
+    /// Accepts a PR number (e.g. 123) or a full GitHub URL
+    /// (e.g. https://github.com/owner/repo/pull/123). Uses the `gh`
+    /// CLI to resolve the PR's base branch and head commit, then
+    /// reviews only the changed .rs files. Requires `gh` on PATH.
+    #[arg(long, value_name = "NUMBER_OR_URL", conflicts_with = "diff")]
+    pub pr: Option<String>,
 
     /// Seed for reproducible task assignments.
     ///

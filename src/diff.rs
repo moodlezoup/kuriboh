@@ -133,6 +133,60 @@ pub fn resolve_diff(target: &Path, range: &str) -> Result<DiffContext> {
     })
 }
 
+/// Parse a `--pr` value into a PR number.
+///
+/// Accepts either a bare number (`123`) or a GitHub PR URL
+/// (`https://github.com/owner/repo/pull/123`).
+fn parse_pr_input(input: &str) -> Result<u32> {
+    // Bare number?
+    if let Ok(n) = input.parse::<u32>() {
+        return Ok(n);
+    }
+    // GitHub URL — extract the number after /pull/
+    if let Some(rest) = input.rsplit_once("/pull/") {
+        let number_str = rest.1.trim_end_matches('/');
+        if let Ok(n) = number_str.parse::<u32>() {
+            return Ok(n);
+        }
+    }
+    bail!("Invalid --pr value: expected a PR number or GitHub URL (e.g. 123 or https://github.com/owner/repo/pull/123)");
+}
+
+/// Resolve a GitHub PR into a `DiffContext` using the `gh` CLI.
+///
+/// Fetches the PR's base branch and head SHA via `gh pr view`, then delegates
+/// to [`resolve_diff`] with `baseRefName..headRefSha`.
+pub fn resolve_pr(target: &Path, pr_input: &str) -> Result<DiffContext> {
+    let pr_number = parse_pr_input(pr_input)?;
+
+    // Use gh to get base branch and head SHA.
+    let output = std::process::Command::new("gh")
+        .args([
+            "pr",
+            "view",
+            &pr_number.to_string(),
+            "--json",
+            "baseRefName,headRefOid",
+            "--jq",
+            ".baseRefName + \"..\" + .headRefOid",
+        ])
+        .current_dir(target)
+        .output()
+        .context("failed to run `gh pr view` — is the GitHub CLI (`gh`) installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("gh pr view failed for PR #{pr_number}: {stderr}");
+    }
+
+    let range = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if range.is_empty() || !range.contains("..") {
+        bail!("Unexpected output from `gh pr view` for PR #{pr_number}: {range:?}");
+    }
+
+    resolve_diff(target, &range)
+}
+
 /// Split a unified diff into per-file sections.
 fn split_diff_by_file(diff: &str) -> HashMap<String, String> {
     let mut result = HashMap::new();
@@ -279,5 +333,34 @@ diff --git a/src/b.rs b/src/b.rs
         assert!(should_skip(".kuriboh/state.rs"));
         assert!(!should_skip("src/main.rs"));
         assert!(!should_skip("crates/core/src/lib.rs"));
+    }
+
+    #[test]
+    fn parse_pr_input_number() {
+        assert_eq!(parse_pr_input("123").unwrap(), 123);
+        assert_eq!(parse_pr_input("1").unwrap(), 1);
+    }
+
+    #[test]
+    fn parse_pr_input_github_url() {
+        assert_eq!(
+            parse_pr_input("https://github.com/owner/repo/pull/456").unwrap(),
+            456
+        );
+    }
+
+    #[test]
+    fn parse_pr_input_github_url_trailing_slash() {
+        assert_eq!(
+            parse_pr_input("https://github.com/owner/repo/pull/789/").unwrap(),
+            789
+        );
+    }
+
+    #[test]
+    fn parse_pr_input_invalid() {
+        assert!(parse_pr_input("not-a-number").is_err());
+        assert!(parse_pr_input("https://github.com/owner/repo/issues/123").is_err());
+        assert!(parse_pr_input("").is_err());
     }
 }

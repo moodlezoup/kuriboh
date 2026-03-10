@@ -24,6 +24,10 @@ kuriboh --target /path/to/crate --diff main..feature --dangerously-skip-permissi
 
 # Estimate cost for diff review
 kuriboh --target /path/to/crate --diff main..feature --estimate
+
+# Review a GitHub pull request (requires `gh` CLI)
+kuriboh --target /path/to/crate --pr 123 --dangerously-skip-permissions
+kuriboh --target /path/to/crate --pr https://github.com/owner/repo/pull/123 --dangerously-skip-permissions
 ```
 
 Run `cargo test` to execute tests. Verify changes with `cargo build` (must produce 0 errors, 0 warnings).
@@ -65,7 +69,7 @@ With `--diff base..head`: scouting/review scope narrows to changed `.rs` files o
 - `agents/templates.rs` -- 5 subagent definitions: scout (3 LLM metrics only), appraiser, unsafe-auditor, dep-checker, crypto-reviewer.
 - `agents/mod.rs` -- `BUILTIN_AGENTS` registry, `install()` writes `.claude/agents/*.md`, `cleanup()` handles worktree removal then deletes `.kuriboh/`.
 - `report.rs` -- `Report` and `Finding` structs. `parse_from_workspace()` reads compiled-findings.json directly. Renders Markdown or JSON.
-- `cli.rs` -- clap-derived Args. Notable: `--reviewers`, `--max-turns` (400), `--resume`, `--seed`, `--keep-workspace`, `--dangerously-skip-permissions`, `--verbose`, `--estimate`, `--diff <base..head>`.
+- `cli.rs` -- clap-derived Args. Notable: `--reviewers`, `--max-turns` (400), `--resume`, `--seed`, `--keep-workspace`, `--dangerously-skip-permissions`, `--verbose`, `--estimate`, `--diff <base..head>`, `--pr <number_or_url>`.
 
 ### `.kuriboh/` workspace layout
 

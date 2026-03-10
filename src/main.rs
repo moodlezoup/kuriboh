@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Resolve diff context if --diff was provided.
+    // Resolve diff context if --diff or --pr was provided.
     let diff_ctx = if let Some(ref range) = args.diff {
         let ctx = diff::resolve_diff(&args.target, range)?;
         info!(
@@ -57,6 +57,16 @@ async fn main() -> Result<()> {
             head = %ctx.head,
             changed_files = ctx.files.len(),
             "Diff mode: reviewing changes"
+        );
+        Some(ctx)
+    } else if let Some(ref pr_input) = args.pr {
+        let ctx = diff::resolve_pr(&args.target, pr_input)?;
+        info!(
+            pr = pr_input,
+            base = %ctx.base,
+            head = %ctx.head,
+            changed_files = ctx.files.len(),
+            "PR mode: reviewing pull request changes"
         );
         Some(ctx)
     } else {
@@ -463,17 +473,32 @@ async fn run_appraisal_compilation(state: &mut State, args: &cli::Args) -> Resul
 
 #[expect(clippy::print_stdout)]
 fn print_estimate(args: &cli::Args) {
-    let (file_count, reviewers, mode_label) = if let Some(ref range) = args.diff {
-        match diff::resolve_diff(&args.target, range) {
+    let diff_result = args
+        .diff
+        .as_ref()
+        .map(|range| {
+            (
+                diff::resolve_diff(&args.target, range),
+                format!("diff ({range})"),
+            )
+        })
+        .or_else(|| {
+            args.pr
+                .as_ref()
+                .map(|pr| (diff::resolve_pr(&args.target, pr), format!("pr ({pr})")))
+        });
+
+    let (file_count, reviewers, mode_label) = if let Some((result, label)) = diff_result {
+        match result {
             Ok(ctx) => {
                 let count = ctx.files.len();
                 let r = args
                     .reviewers
                     .unwrap_or_else(|| scanner::default_reviewer_count_diff(count));
-                (count, r, format!("diff ({range})"))
+                (count, r, label)
             }
             Err(e) => {
-                println!("Error resolving diff: {e}");
+                println!("Error: {e}");
                 return;
             }
         }
