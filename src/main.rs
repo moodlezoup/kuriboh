@@ -95,11 +95,8 @@ async fn main() -> Result<()> {
 
     // Validate --diff and --resume mode consistency.
     if args.resume {
-        match (&state.mode, &args.diff) {
-            (state::ReviewMode::Full, Some(_)) => {
-                bail!("Cannot use --diff with --resume on a full-mode review. Start a new review with --diff instead.");
-            }
-            _ => {} // matching modes or resuming diff without --diff (mode is in state)
+        if let (state::ReviewMode::Full, Some(_)) = (&state.mode, &args.diff) {
+            bail!("Cannot use --diff with --resume on a full-mode review. Start a new review with --diff instead.");
         }
     }
 

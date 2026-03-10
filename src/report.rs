@@ -398,11 +398,9 @@ pub fn parse_from_workspace(target: &Path) -> Result<Report> {
     // Load state once for cost + diff summary.
     let loaded_state = State::load(target).ok();
 
-    let total_cost = loaded_state
-        .as_ref()
-        .map_or(0.0, |s| {
-            s.phases.values().filter_map(|p| p.cost_usd).sum::<f64>()
-        });
+    let total_cost = loaded_state.as_ref().map_or(0.0, |s| {
+        s.phases.values().filter_map(|p| p.cost_usd).sum::<f64>()
+    });
 
     let diff_summary = loaded_state.as_ref().and_then(|s| {
         match &s.mode {
@@ -415,8 +413,10 @@ pub fn parse_from_workspace(target: &Path) -> Result<Report> {
                         .output()
                         .ok()
                         .and_then(|o| String::from_utf8(o.stdout).ok())
-                        .map(|sha| sha.trim().to_string())
-                        .unwrap_or_else(|| ref_name.to_string())
+                        .map_or_else(
+                            || ref_name.to_string(),
+                            |sha| sha.trim().to_string(),
+                        )
                 };
                 let base_sha = resolve_sha(base);
                 let head_sha = resolve_sha(head);
