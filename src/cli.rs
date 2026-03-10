@@ -136,6 +136,13 @@ pub struct Args {
     /// intermediate artifacts produced during the phased review.
     #[arg(long)]
     pub keep_workspace: bool,
+
+    /// Display a real-time TUI showing phase progress and review activity.
+    ///
+    /// Mutually exclusive with `--verbose`: the TUI replaces streaming
+    /// agent output with a structured dashboard.
+    #[arg(long, conflicts_with = "verbose")]
+    pub tui: bool,
 }
 
 pub fn parse() -> Args {
