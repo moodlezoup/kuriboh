@@ -19,7 +19,11 @@ pub struct SessionOpts {
 
 /// Spawn a single Claude Code session, stream its NDJSON output, and return
 /// the full sequence of parsed [`ClaudeEvent`]s.
-pub async fn run_session(args: &Args, opts: &SessionOpts) -> Result<Vec<ClaudeEvent>> {
+pub async fn run_session(
+    args: &Args,
+    opts: &SessionOpts,
+    tui_tx: Option<&tokio::sync::mpsc::UnboundedSender<crate::tui::TuiEvent>>,
+) -> Result<Vec<ClaudeEvent>> {
     let mut claude_args = Vec::new();
     if args.dangerously_skip_permissions {
         claude_args.push("--dangerously-skip-permissions".to_string());
@@ -91,6 +95,9 @@ pub async fn run_session(args: &Args, opts: &SessionOpts) -> Result<Vec<ClaudeEv
                                 print_event_text(&ev);
                             }
                             tracing::debug!(?ev, "event");
+                            if let Some(tx) = &tui_tx {
+                                let _ = tx.send(crate::tui::TuiEvent::Claude(ev.clone()));
+                            }
                             collected.push(ev);
                         }
                     }
