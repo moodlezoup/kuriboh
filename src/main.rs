@@ -80,6 +80,16 @@ async fn main() -> Result<()> {
 
     info!(target = %args.target.display(), "Starting kuriboh security review");
 
+    // Clean stale workspace from a prior run before starting fresh.
+    // Must happen before agents::install(), which creates .kuriboh/.
+    if !args.resume {
+        let kb = args.target.join(".kuriboh");
+        if kb.exists() {
+            info!("Cleaning stale .kuriboh/ workspace from prior run");
+            agents::cleanup(&args.target)?;
+        }
+    }
+
     // Install subagent definitions.
     agents::install(&args.target, &args.agents_config)?;
 

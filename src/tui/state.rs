@@ -151,6 +151,10 @@ impl TuiState {
                     _ => return,
                 };
                 self.phase_start_time = Instant::now();
+                // Clear file activity from prior phases/runs so the deep review
+                // view starts clean.
+                self.file_activity.clear();
+                self.reviewer_files.clear();
                 self.push_log(
                     "system",
                     &format!("Phase started: {}", self.current_phase.label()),
@@ -265,8 +269,11 @@ impl TuiState {
     }
 
     /// Poll workspace files for findings. Resets finding counts before each poll
-    /// to avoid unbounded accumulation.
+    /// to avoid unbounded accumulation. Only polls during the deep review phase.
     pub fn poll_workspace(&mut self, workspace: &Path) {
+        if self.current_phase != Phase::DeepReview {
+            return;
+        }
         let findings_dir = workspace.join("findings");
         let Ok(entries) = std::fs::read_dir(&findings_dir) else {
             return;
