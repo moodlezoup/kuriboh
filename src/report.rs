@@ -78,6 +78,9 @@ pub struct Report {
     /// Summary of review coverage (reviewers, files reviewed, tier coverage).
     #[serde(default)]
     pub review_coverage: Option<String>,
+    /// Diff mode summary: "Changes: base..head (N files)"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff_summary: Option<String>,
     pub findings: Vec<Finding>,
     /// Findings that the appraiser flagged as needing human review.
     #[serde(default)]
@@ -111,6 +114,10 @@ pub fn write(report: &Report, path: &Path, force_json: bool) -> Result<()> {
 fn render_markdown(report: &Report) -> String {
     let mut out = String::new();
     out.push_str("# Kuriboh Security Review Report\n\n");
+
+    if let Some(diff) = &report.diff_summary {
+        out.push_str(&format!("**{diff}**\n\n"));
+    }
 
     out.push_str("## Executive Summary\n\n");
     out.push_str(&report.executive_summary);
@@ -388,9 +395,38 @@ pub fn parse_from_workspace(target: &Path) -> Result<Report> {
             format!("{total} files scored. {critical} critical-tier, {high} high-tier.")
         });
 
-    // Sum costs from state.json if available.
-    let total_cost = State::load(target).ok().map_or(0.0, |s| {
-        s.phases.values().filter_map(|p| p.cost_usd).sum::<f64>()
+    // Load state once for cost + diff summary.
+    let loaded_state = State::load(target).ok();
+
+    let total_cost = loaded_state
+        .as_ref()
+        .map_or(0.0, |s| {
+            s.phases.values().filter_map(|p| p.cost_usd).sum::<f64>()
+        });
+
+    let diff_summary = loaded_state.as_ref().and_then(|s| {
+        match &s.mode {
+            crate::state::ReviewMode::Diff { base, head, changed_files } => {
+                // Resolve short SHAs for auditability (symbolic refs are mutable).
+                let resolve_sha = |ref_name: &str| -> String {
+                    std::process::Command::new("git")
+                        .args(["rev-parse", "--short", ref_name])
+                        .current_dir(target)
+                        .output()
+                        .ok()
+                        .and_then(|o| String::from_utf8(o.stdout).ok())
+                        .map(|sha| sha.trim().to_string())
+                        .unwrap_or_else(|| ref_name.to_string())
+                };
+                let base_sha = resolve_sha(base);
+                let head_sha = resolve_sha(head);
+                Some(format!(
+                    "Review of changes: `{base}..{head}` ({base_sha}..{head_sha}, {} files changed)",
+                    changed_files.len()
+                ))
+            }
+            crate::state::ReviewMode::Full => None,
+        }
     });
 
     let executive_summary = if findings.is_empty() && needs_review.is_empty() {
@@ -407,6 +443,7 @@ pub fn parse_from_workspace(target: &Path) -> Result<Report> {
         executive_summary,
         scouting_summary,
         review_coverage: None,
+        diff_summary,
         findings,
         needs_review,
         total_cost_usd: total_cost,
@@ -553,6 +590,7 @@ Needs review stuff.";
             executive_summary: "Found 1 issue.".into(),
             scouting_summary: Some("10 files scored.".into()),
             review_coverage: Some("3 reviewers.".into()),
+            diff_summary: None,
             findings: vec![Finding {
                 severity: Severity::High,
                 title: "Test finding".into(),
@@ -739,6 +777,7 @@ Needs review stuff.";
             executive_summary: "No issues.".into(),
             scouting_summary: None,
             review_coverage: None,
+            diff_summary: None,
             findings: vec![],
             needs_review: vec![],
             total_cost_usd: 0.0,
