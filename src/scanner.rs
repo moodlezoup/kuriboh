@@ -596,6 +596,13 @@ pub fn default_reviewer_count(file_count: usize) -> u32 {
     ((file_count as f64).sqrt().ceil() as u32).clamp(3, 12)
 }
 
+/// Compute the dynamic reviewer count for diff mode: ceil(sqrt(n)) clamped to [1, 12].
+///
+/// Lower floor than full mode since small diffs don't need 3 reviewers.
+pub fn default_reviewer_count_diff(file_count: usize) -> u32 {
+    ((file_count as f64).sqrt().ceil() as u32).clamp(1, 12)
+}
+
 #[cfg(test)]
 #[expect(clippy::unwrap_used)]
 mod tests {
@@ -878,6 +885,16 @@ fn todo_marker() { todo!("TODO: fix this") }
         assert_eq!(default_reviewer_count(25), 5);
         assert_eq!(default_reviewer_count(100), 10);
         assert_eq!(default_reviewer_count(200), 12);
+    }
+
+    #[test]
+    fn default_reviewer_count_diff_values() {
+        assert_eq!(default_reviewer_count_diff(1), 1);
+        assert_eq!(default_reviewer_count_diff(2), 2);
+        assert_eq!(default_reviewer_count_diff(4), 2);
+        assert_eq!(default_reviewer_count_diff(9), 3);
+        assert_eq!(default_reviewer_count_diff(100), 10);
+        assert_eq!(default_reviewer_count_diff(200), 12);
     }
 
     #[test]

@@ -248,9 +248,18 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
     }
 
     let file_strings: Vec<String> = file_list.iter().map(|p| p.display().to_string()).collect();
+    // Store full file list (needed for exploration context even in diff mode).
     state.files.clone_from(&file_strings);
 
-    let static_scores: Vec<(String, scanner::StaticMetrics)> = file_list
+    // In diff mode, score only changed files; in full mode, score all.
+    let files_to_score: Vec<String> = match &state.mode {
+        state::ReviewMode::Diff { changed_files, .. } => {
+            changed_files.iter().map(|f| f.path.clone()).collect()
+        }
+        state::ReviewMode::Full => file_strings.clone(),
+    };
+
+    let static_scores: Vec<(String, scanner::StaticMetrics)> = files_to_score
         .par_iter()
         .map(|file_path| {
             let full_path = args.target.join(file_path);
@@ -259,12 +268,12 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
                 String::new()
             });
             let metrics = scanner::compute_static_metrics(&source);
-            (file_path.display().to_string(), metrics)
+            (file_path.clone(), metrics)
         })
         .collect();
 
     // 2b: LLM metrics via scout subagents.
-    let prompt = prompts::llm_scouting(&args.target.display().to_string(), &file_strings);
+    let prompt = prompts::llm_scouting(&args.target.display().to_string(), &files_to_score);
     let events = runner::run_session(
         args,
         &runner::SessionOpts {
@@ -288,9 +297,10 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
     std::fs::write(args.target.join(".kuriboh/scores.json"), &scores_json)?;
 
     // Generate task assignments.
-    let reviewer_count = args
-        .reviewers
-        .unwrap_or_else(|| scanner::default_reviewer_count(file_scores.len()));
+    let reviewer_count = args.reviewers.unwrap_or_else(|| match &state.mode {
+        state::ReviewMode::Diff { .. } => scanner::default_reviewer_count_diff(file_scores.len()),
+        state::ReviewMode::Full => scanner::default_reviewer_count(file_scores.len()),
+    });
     state.reviewer_count = reviewer_count;
     let (assignments, reserve_count) =
         scanner::generate_assignments(&file_scores, reviewer_count, state.seed);
