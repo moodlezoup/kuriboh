@@ -74,6 +74,33 @@ impl ReviewerLens {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed { from: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiffFile {
+    pub path: String,
+    pub status: FileStatus,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewMode {
+    #[default]
+    Full,
+    Diff {
+        base: String,
+        head: String,
+        changed_files: Vec<DiffFile>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskAssignment {
     pub reviewer_id: u32,
@@ -102,6 +129,8 @@ pub struct State {
     pub task_assignments: Vec<TaskAssignment>,
     #[serde(default)]
     pub reserve_count: u32,
+    #[serde(default)]
+    pub mode: ReviewMode,
 }
 
 pub const PHASE_ORDER: &[&str] = &[
@@ -138,6 +167,7 @@ impl State {
             reviewer_count: 0,
             task_assignments: Vec::new(),
             reserve_count: 0,
+            mode: ReviewMode::Full,
         }
     }
 
@@ -351,6 +381,51 @@ mod tests {
 
         std::fs::write(kb.join("reviewer-2.json"), "[]").unwrap();
         assert!(check_sentinel(dir.path(), "deep_review", &state).unwrap());
+    }
+
+    #[test]
+    fn review_mode_full_round_trip() {
+        let mode = ReviewMode::Full;
+        let json = serde_json::to_string(&mode).unwrap();
+        let loaded: ReviewMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, ReviewMode::Full);
+    }
+
+    #[test]
+    fn review_mode_diff_round_trip() {
+        let mode = ReviewMode::Diff {
+            base: "main".to_string(),
+            head: "feature".to_string(),
+            changed_files: vec![DiffFile {
+                path: "src/lib.rs".to_string(),
+                status: FileStatus::Modified,
+            }],
+        };
+        let json = serde_json::to_string(&mode).unwrap();
+        let loaded: ReviewMode = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded, mode);
+    }
+
+    #[test]
+    fn review_mode_defaults_to_full() {
+        // Simulates deserializing old state.json without mode field
+        let json = r#"{
+            "version": 1,
+            "started_at": "1234567890",
+            "target": "/tmp/test",
+            "seed": 42,
+            "phases": {
+                "exploration": {"status": "pending"},
+                "scouting": {"status": "pending"},
+                "deep_review": {"status": "pending"},
+                "appraisal_compilation": {"status": "pending"}
+            },
+            "files": [],
+            "reviewer_count": 0,
+            "task_assignments": []
+        }"#;
+        let state: State = serde_json::from_str(json).unwrap();
+        assert_eq!(state.mode, ReviewMode::Full);
     }
 
     #[test]
