@@ -1,5 +1,6 @@
 mod agents;
 mod cli;
+mod diff;
 mod events;
 mod prompts;
 mod report;
