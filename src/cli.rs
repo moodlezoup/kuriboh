@@ -104,6 +104,15 @@ pub struct Args {
     #[arg(long)]
     pub resume: bool,
 
+    /// Focus review on changes between two commits.
+    ///
+    /// Accepts git range syntax: base..head (e.g. main..feature,
+    /// abc123..def456). Only .rs files changed in the range are scored
+    /// and assigned to reviewers. Reviewers receive diff hunks to
+    /// focus their analysis.
+    #[arg(long, value_name = "RANGE")]
+    pub diff: Option<String>,
+
     /// Seed for reproducible task assignments.
     ///
     /// Controls the weighted-random reviewer-to-file mapping in Phase 3.
