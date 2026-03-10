@@ -15,11 +15,15 @@ use tracing::info;
 
 use state::{PhaseStatus, State};
 
+type TuiTx = Option<tokio::sync::mpsc::UnboundedSender<tui::TuiEvent>>;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let mut args = cli::parse();
 
-    let default_level = if args.verbose {
+    let default_level = if args.tui {
+        "kuriboh=warn"
+    } else if args.verbose {
         "kuriboh=debug"
     } else {
         "kuriboh=info"
@@ -127,14 +131,29 @@ async fn main() -> Result<()> {
     // Save initial state so --resume can find it even if we crash in phase 1.
     state.save(&args.target)?;
 
+    // Spawn TUI if requested.
+    let tui_tx: TuiTx = if args.tui {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let workspace = args.target.join(".kuriboh");
+        let tui_app = tui::TuiApp::new(rx, workspace);
+        tokio::spawn(async move {
+            if let Err(e) = tui_app.run().await {
+                tracing::warn!(err = %e, "TUI exited with error");
+            }
+        });
+        Some(tx)
+    } else {
+        None
+    };
+
     // === Phase 1: Exploration ===
-    run_phase(&mut state, &args, "exploration", &diff_ctx).await?;
+    run_phase(&mut state, &args, "exploration", &diff_ctx, &tui_tx).await?;
 
     // === Phase 2: Scouting ===
-    run_phase(&mut state, &args, "scouting", &diff_ctx).await?;
+    run_phase(&mut state, &args, "scouting", &diff_ctx, &tui_tx).await?;
 
     // === Phase 3: Deep Review ===
-    run_phase(&mut state, &args, "deep_review", &diff_ctx).await?;
+    run_phase(&mut state, &args, "deep_review", &diff_ctx, &tui_tx).await?;
 
     // Pre-deduplicate findings across reviewers (Rust-side, before appraisal).
     match report::pre_deduplicate_findings(&args.target) {
@@ -152,11 +171,17 @@ async fn main() -> Result<()> {
     }
 
     // === Phase 4+5: Appraisal & Compilation ===
-    run_phase(&mut state, &args, "appraisal_compilation", &diff_ctx).await?;
+    run_phase(&mut state, &args, "appraisal_compilation", &diff_ctx, &tui_tx).await?;
 
     // === Report Generation (Rust, no Claude) ===
     let report = report::parse_from_workspace(&args.target)?;
     report::write(&report, &args.output, args.json)?;
+
+    // Shut down TUI before cleanup.
+    if let Some(tx) = tui_tx {
+        let _ = tx.send(tui::TuiEvent::Shutdown);
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
 
     if !args.keep_workspace {
         agents::cleanup(&args.target)?;
@@ -176,6 +201,7 @@ async fn run_phase(
     args: &cli::Args,
     phase_name: &str,
     diff_ctx: &Option<diff::DiffContext>,
+    tui_tx: &TuiTx,
 ) -> Result<()> {
     // Check if already done and sentinel still valid.
     if *state.phase_status(phase_name) == PhaseStatus::Done {
@@ -189,15 +215,21 @@ async fn run_phase(
         );
     }
 
+    if let Some(tx) = tui_tx {
+        let _ = tx.send(tui::TuiEvent::PhaseStart {
+            name: phase_name.to_string(),
+        });
+    }
+
     info!(phase = phase_name, "Starting phase");
     state.phase_mut(phase_name).status = PhaseStatus::Running;
     state.save(&args.target)?;
 
     let result = match phase_name {
-        "exploration" => run_exploration(state, args, diff_ctx).await,
-        "scouting" => run_scouting(state, args).await,
-        "deep_review" => run_deep_review(state, args, diff_ctx).await,
-        "appraisal_compilation" => run_appraisal_compilation(state, args).await,
+        "exploration" => run_exploration(state, args, diff_ctx, tui_tx).await,
+        "scouting" => run_scouting(state, args, tui_tx).await,
+        "deep_review" => run_deep_review(state, args, diff_ctx, tui_tx).await,
+        "appraisal_compilation" => run_appraisal_compilation(state, args, tui_tx).await,
         _ => bail!("Unknown phase: {phase_name}"),
     };
 
@@ -205,7 +237,14 @@ async fn run_phase(
         Ok(()) => {
             if state::check_sentinel(&args.target, phase_name, state)? {
                 state.phase_mut(phase_name).status = PhaseStatus::Done;
+                let cost = state.phase_mut(phase_name).cost_usd.unwrap_or(0.0);
                 state.save(&args.target)?;
+                if let Some(tx) = tui_tx {
+                    let _ = tx.send(tui::TuiEvent::PhaseComplete {
+                        name: phase_name.to_string(),
+                        cost_usd: cost,
+                    });
+                }
                 info!(phase = phase_name, "Phase complete");
                 Ok(())
             } else {
@@ -230,6 +269,7 @@ async fn run_exploration(
     state: &mut State,
     args: &cli::Args,
     diff_ctx: &Option<diff::DiffContext>,
+    tui_tx: &TuiTx,
 ) -> Result<()> {
     let exploration_diff = diff_ctx
         .as_ref()
@@ -252,6 +292,7 @@ async fn run_exploration(
             agent_teams: false,
             model: None,
         },
+        tui_tx.as_ref(),
     )
     .await?;
     let cost = events::total_cost_usd(&events);
@@ -259,7 +300,7 @@ async fn run_exploration(
     Ok(())
 }
 
-async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
+async fn run_scouting(state: &mut State, args: &cli::Args, tui_tx: &TuiTx) -> Result<()> {
     // 2a: Enumerate files and compute static metrics.
     let mut file_list = scanner::enumerate_files(&args.target, false)?;
     if file_list.len() > 300 {
@@ -311,6 +352,7 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
             agent_teams: false,
             model: None,
         },
+        tui_tx.as_ref(),
     )
     .await?;
     let cost = events::total_cost_usd(&events);
@@ -347,6 +389,16 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
         mandatory_count, reserve_count, "Task assignments generated"
     );
 
+    if let Some(tx) = tui_tx {
+        let _ = tx.send(tui::TuiEvent::ScoresLoaded(file_scores));
+        for a in &state.task_assignments {
+            let _ = tx.send(tui::TuiEvent::ReviewerAssigned {
+                id: a.reviewer_id,
+                file: a.starting_file.clone(),
+            });
+        }
+    }
+
     state.save(&args.target)?;
 
     Ok(())
@@ -356,6 +408,7 @@ async fn run_deep_review(
     state: &mut State,
     args: &cli::Args,
     diff_ctx: &Option<diff::DiffContext>,
+    tui_tx: &TuiTx,
 ) -> Result<()> {
     // Prune stale worktree metadata from prior runs (e.g. --keep-workspace
     // leaves .git/worktrees/ references to deleted directories, which blocks
@@ -442,6 +495,7 @@ async fn run_deep_review(
             agent_teams: true,
             model: Some("claude-opus-4-6".to_string()),
         },
+        tui_tx.as_ref(),
     )
     .await?;
     let cost = events::total_cost_usd(&events);
@@ -464,7 +518,11 @@ async fn run_deep_review(
     Ok(())
 }
 
-async fn run_appraisal_compilation(state: &mut State, args: &cli::Args) -> Result<()> {
+async fn run_appraisal_compilation(
+    state: &mut State,
+    args: &cli::Args,
+    tui_tx: &TuiTx,
+) -> Result<()> {
     let reviewer_ids: Vec<u32> = state
         .task_assignments
         .iter()
@@ -482,6 +540,7 @@ async fn run_appraisal_compilation(state: &mut State, args: &cli::Args) -> Resul
             agent_teams: false,
             model: None,
         },
+        tui_tx.as_ref(),
     )
     .await?;
     let cost = events::total_cost_usd(&events);
