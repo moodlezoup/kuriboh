@@ -7,6 +7,7 @@ mod report;
 mod runner;
 mod scanner;
 mod state;
+mod tui;
 
 use anyhow::{bail, Context, Result};
 use rayon::prelude::*;
