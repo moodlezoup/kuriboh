@@ -114,7 +114,16 @@ fn build_tree_lines(state: &TuiState) -> Vec<Line<'static>> {
                 .then_with(|| a.0.cmp(&b.0))
         });
 
-        if !files.is_empty() {
+        if files.is_empty() {
+            // Entire directory collapsed.
+            lines.push(Line::from(vec![
+                Span::styled(format!("{dir}/"), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("  {} reviewed", entry.reviewed_no_findings),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]));
+        } else {
             // Directory header
             lines.push(Line::styled(
                 format!("{dir}/"),
@@ -137,15 +146,6 @@ fn build_tree_lines(state: &TuiState) -> Vec<Line<'static>> {
                     Style::default().fg(Color::DarkGray),
                 ));
             }
-        } else {
-            // Entire directory collapsed.
-            lines.push(Line::from(vec![
-                Span::styled(format!("{dir}/"), Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("  {} reviewed", entry.reviewed_no_findings),
-                    Style::default().fg(Color::DarkGray),
-                ),
-            ]));
         }
     }
 
@@ -156,7 +156,11 @@ fn build_file_line(filename: &str, file_state: &FileState) -> Line<'static> {
     let is_active = !file_state.active_reviewers.is_empty();
     let has_findings = file_state.findings.total() > 0;
 
-    let prefix = if is_active { "  \u{25b6} " } else { "  \u{25cf} " };
+    let prefix = if is_active {
+        "  \u{25b6} "
+    } else {
+        "  \u{25cf} "
+    };
     let prefix_color = if is_active { Color::Green } else { Color::Red };
 
     let mut spans: Vec<Span> = vec![

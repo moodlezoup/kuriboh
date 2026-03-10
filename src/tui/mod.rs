@@ -54,7 +54,7 @@ impl TuiApp {
         // Set panic hook to restore terminal on crash.
         let original_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = ratatui::restore();
+            ratatui::restore();
             original_hook(info);
         }));
 
@@ -85,7 +85,7 @@ impl TuiApp {
                     }
                     // Poll workspace files every 5 ticks (500ms)
                     poll_counter += 1;
-                    if poll_counter % 5 == 0 {
+                    if poll_counter.is_multiple_of(5) {
                         self.state.poll_workspace(&self.workspace_path);
                     }
                     self.state.decay_active_reviewers();

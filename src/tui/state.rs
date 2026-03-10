@@ -14,7 +14,6 @@ pub enum Phase {
     Scouting,
     DeepReview,
     Appraisal,
-    Complete,
 }
 
 impl Phase {
@@ -24,7 +23,6 @@ impl Phase {
             Self::Scouting => "Scouting",
             Self::DeepReview => "Deep Review",
             Self::Appraisal => "Appraisal & Compilation",
-            Self::Complete => "Complete",
         }
     }
 }
@@ -107,7 +105,6 @@ impl TuiState {
             Phase::Scouting => "scouting",
             Phase::DeepReview => "deep_review",
             Phase::Appraisal => "appraisal_compilation",
-            Phase::Complete => "complete",
         }
     }
 
@@ -136,7 +133,6 @@ impl TuiState {
                     self.findings_appraised as f64 / self.total_findings_to_appraise as f64
                 }
             }
-            Phase::Complete => 1.0,
         }
     }
 
@@ -162,7 +158,10 @@ impl TuiState {
             }
             TuiEvent::PhaseComplete { name, cost_usd } => {
                 self.cumulative_cost += cost_usd;
-                self.push_log("system", &format!("Phase complete: {name} (${cost_usd:.2})"));
+                self.push_log(
+                    "system",
+                    &format!("Phase complete: {name} (${cost_usd:.2})"),
+                );
             }
             TuiEvent::ScoresLoaded(scores) => {
                 self.total_files_to_score = scores.len();
@@ -188,10 +187,11 @@ impl TuiState {
                     }
                 }
             }
-            ClaudeEvent::Result { total_cost_usd, .. } => {
-                if let Some(cost) = total_cost_usd {
-                    self.cumulative_cost += cost;
-                }
+            ClaudeEvent::Result {
+                total_cost_usd: Some(cost),
+                ..
+            } => {
+                self.cumulative_cost += cost;
             }
             _ => {}
         }
@@ -245,7 +245,10 @@ impl TuiState {
         state.active_reviewers.insert(reviewer_id);
         state.last_activity = Instant::now();
 
-        self.push_log(&format!("r-{reviewer_id}"), &format!("{tool_name} {relative}"));
+        self.push_log(
+            &format!("r-{reviewer_id}"),
+            &format!("{tool_name} {relative}"),
+        );
     }
 
     /// Remove reviewers from active sets if they've been idle too long.
@@ -298,15 +301,15 @@ impl TuiState {
                     if normalized.is_empty() {
                         continue;
                     }
-                    let counts = self
-                        .file_activity
-                        .entry(normalized)
-                        .or_insert_with(|| FileState {
-                            active_reviewers: HashSet::new(),
-                            findings: FindingCounts::default(),
-                            last_activity: Instant::now(),
-                            reviewed: true,
-                        });
+                    let counts =
+                        self.file_activity
+                            .entry(normalized)
+                            .or_insert_with(|| FileState {
+                                active_reviewers: HashSet::new(),
+                                findings: FindingCounts::default(),
+                                last_activity: Instant::now(),
+                                reviewed: true,
+                            });
                     match finding.severity {
                         Severity::Critical | Severity::High => counts.findings.high += 1,
                         Severity::Medium => counts.findings.medium += 1,

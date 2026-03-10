@@ -171,7 +171,14 @@ async fn main() -> Result<()> {
     }
 
     // === Phase 4+5: Appraisal & Compilation ===
-    run_phase(&mut state, &args, "appraisal_compilation", &diff_ctx, &tui_tx).await?;
+    run_phase(
+        &mut state,
+        &args,
+        "appraisal_compilation",
+        &diff_ctx,
+        &tui_tx,
+    )
+    .await?;
 
     // === Report Generation (Rust, no Claude) ===
     let report = report::parse_from_workspace(&args.target)?;

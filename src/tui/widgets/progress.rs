@@ -28,8 +28,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &TuiState) {
     };
 
     let pct_str = if progress < 0.0 {
-        let dots = ".".repeat((state.elapsed().as_secs() % 4) as usize + 1);
-        dots
+        ".".repeat((state.elapsed().as_secs() % 4) as usize + 1)
     } else {
         format!("{}%", (progress * 100.0) as u32)
     };

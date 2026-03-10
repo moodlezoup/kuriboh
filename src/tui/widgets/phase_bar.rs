@@ -4,18 +4,12 @@ use ratatui::widgets::{Block, Borders, Gauge, Paragraph};
 use crate::tui::state::TuiState;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &TuiState, quit_requested: bool) {
-    let block = Block::default()
-        .borders(Borders::BOTTOM)
-        .title(" kuriboh ");
+    let block = Block::default().borders(Borders::BOTTOM).title(" kuriboh ");
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    let chunks = Layout::horizontal([
-        Constraint::Min(20),
-        Constraint::Length(25),
-    ])
-    .split(inner);
+    let chunks = Layout::horizontal([Constraint::Min(20), Constraint::Length(25)]).split(inner);
 
     let progress = state.phase_progress();
     let elapsed = state.elapsed();

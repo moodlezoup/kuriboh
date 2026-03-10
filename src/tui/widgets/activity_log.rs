@@ -6,9 +6,7 @@ use crate::tui::state::TuiState;
 const DISPLAY_LINES: usize = 5;
 
 pub fn render(frame: &mut Frame, area: Rect, state: &TuiState) {
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Activity ");
+    let block = Block::default().borders(Borders::ALL).title(" Activity ");
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
