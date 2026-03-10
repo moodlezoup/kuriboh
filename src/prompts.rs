@@ -1,4 +1,5 @@
-use crate::state::TaskAssignment;
+use crate::state::{DiffFile, FileStatus, TaskAssignment};
+use std::collections::HashMap;
 
 /// Phase 1: Exploration prompt. Focused on codebase survey only.
 pub fn exploration(target: &str, user_guidance: Option<&str>) -> String {
@@ -87,6 +88,14 @@ NEVER proceed to the next step with invalid JSON on disk."#
     )
 }
 
+/// Diff context passed to the deep review prompt builder.
+pub struct DiffPromptInfo {
+    pub base: String,
+    pub head: String,
+    pub changed_files: Vec<DiffFile>,
+    pub hunks: HashMap<String, String>,
+}
+
 /// Phase 3: Deep review prompt for the agent team lead.
 ///
 /// Task assignments are pre-computed by Rust and embedded here.
@@ -95,6 +104,7 @@ pub fn deep_review(
     target: &str,
     max_turns: u32,
     user_guidance: Option<&str>,
+    diff_info: Option<&DiffPromptInfo>,
 ) -> String {
     let guidance = match user_guidance {
         Some(g) => format!(
@@ -124,9 +134,55 @@ pub fn deep_review(
         )
     };
 
+    let format_assignment_with_diff =
+        |a: &TaskAssignment, hunks: Option<&str>, file_status: Option<&str>| -> String {
+            let base = format_assignment(a);
+            let mut extra = String::new();
+            if let Some(status) = file_status {
+                extra.push_str(&format!("\n  File status: {status}"));
+            }
+            if let Some(h) = hunks {
+                // Truncate very large hunks to avoid blowing up prompt size.
+                // Use char boundary to avoid splitting multi-byte UTF-8.
+                let truncated = if h.len() > 8000 {
+                    let boundary = h
+                        .char_indices()
+                        .take_while(|(i, _)| *i < 8000)
+                        .last()
+                        .map_or(0, |(i, c)| i + c.len_utf8());
+                    format!(
+                        "{}...\n[truncated, {} bytes total]",
+                        &h[..boundary],
+                        h.len()
+                    )
+                } else {
+                    h.to_string()
+                };
+                extra.push_str(&format!("\n  Diff hunks:\n```diff\n{truncated}\n```"));
+            }
+            format!("{base}{extra}")
+        };
+
     let primary_list = primary
         .iter()
-        .map(|a| format_assignment(a))
+        .map(|a| {
+            if let Some(info) = diff_info {
+                let hunks = info.hunks.get(&a.starting_file).map(|s| s.as_str());
+                let file_status = info
+                    .changed_files
+                    .iter()
+                    .find(|f| f.path == a.starting_file)
+                    .map(|f| match &f.status {
+                        FileStatus::Added => "ADDED",
+                        FileStatus::Modified => "MODIFIED",
+                        FileStatus::Deleted => "DELETED",
+                        FileStatus::Renamed { .. } => "RENAMED",
+                    });
+                format_assignment_with_diff(a, hunks, file_status)
+            } else {
+                format_assignment(a)
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -135,10 +191,64 @@ pub fn deep_review(
     } else {
         let items = reserves
             .iter()
-            .map(|a| format_assignment(a))
+            .map(|a| {
+                if let Some(info) = diff_info {
+                    let hunks = info.hunks.get(&a.starting_file).map(|s| s.as_str());
+                    let file_status = info
+                        .changed_files
+                        .iter()
+                        .find(|f| f.path == a.starting_file)
+                        .map(|f| match &f.status {
+                            FileStatus::Added => "ADDED",
+                            FileStatus::Modified => "MODIFIED",
+                            FileStatus::Deleted => "DELETED",
+                            FileStatus::Renamed { .. } => "RENAMED",
+                        });
+                    format_assignment_with_diff(a, hunks, file_status)
+                } else {
+                    format_assignment(a)
+                }
+            })
             .collect::<Vec<_>>()
             .join("\n");
         format!("\n\n## Reserve Slots (for adaptive allocation)\n\n{items}")
+    };
+
+    let diff_section = match diff_info {
+        Some(info) => {
+            let mut section = format!(
+                "\n\n## Diff Mode\n\n\
+                This review focuses on changes between `{}..{}`.\n\
+                Reviewers should focus on the changes shown in their diff hunks.\n\
+                They may freely explore the broader codebase for context, but \
+                findings should relate to the changes.\n\n\
+                ### Changed Files\n\n",
+                info.base, info.head
+            );
+            for f in &info.changed_files {
+                let status_label = match &f.status {
+                    FileStatus::Added => "ADDED".to_string(),
+                    FileStatus::Modified => "MODIFIED".to_string(),
+                    FileStatus::Deleted => "DELETED".to_string(),
+                    FileStatus::Renamed { from } => format!("RENAMED from {from}"),
+                };
+                section.push_str(&format!("- `{}` [{}]\n", f.path, status_label));
+            }
+            section
+        }
+        None => String::new(),
+    };
+
+    let diff_instructions = match diff_info {
+        Some(info) => format!(
+            "\n\nDIFF CONTEXT: This is a diff-focused review of changes between `{}..{}`.\n\
+            Focus your analysis on the changes shown in the diff hunks provided with your \
+            assignment. New files (ADDED) deserve full scrutiny. Modified files should focus \
+            on the changed regions and their implications. You may freely explore the broader \
+            codebase for context, but your findings should relate to the changes.",
+            info.base, info.head
+        ),
+        None => String::new(),
     };
 
     format!(
@@ -256,7 +366,7 @@ validate it:
   `python3 -m json.tool <file> > /dev/null`
 If validation fails, read the file, fix the JSON, rewrite, and re-validate.
 NEVER proceed to the next step with invalid JSON on disk.
-
+{diff_section}{diff_instructions}
 Target codebase: {target}
 Max turns: {max_turns}{guidance}"#,
         reserve_count = reserves.len()

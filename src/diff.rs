@@ -30,7 +30,8 @@ fn parse_range(range: &str) -> Result<(String, String)> {
 
 /// Check if a path should be skipped based on directory exclusions.
 fn should_skip(path: &str) -> bool {
-    path.split('/').any(|component| SKIP_DIRS.contains(&component))
+    path.split('/')
+        .any(|component| SKIP_DIRS.contains(&component))
 }
 
 /// Parse `git diff --name-status` output into DiffFiles.

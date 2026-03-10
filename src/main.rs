@@ -120,13 +120,13 @@ async fn main() -> Result<()> {
     state.save(&args.target)?;
 
     // === Phase 1: Exploration ===
-    run_phase(&mut state, &args, "exploration").await?;
+    run_phase(&mut state, &args, "exploration", &diff_ctx).await?;
 
     // === Phase 2: Scouting ===
-    run_phase(&mut state, &args, "scouting").await?;
+    run_phase(&mut state, &args, "scouting", &diff_ctx).await?;
 
     // === Phase 3: Deep Review ===
-    run_phase(&mut state, &args, "deep_review").await?;
+    run_phase(&mut state, &args, "deep_review", &diff_ctx).await?;
 
     // Pre-deduplicate findings across reviewers (Rust-side, before appraisal).
     match report::pre_deduplicate_findings(&args.target) {
@@ -144,7 +144,7 @@ async fn main() -> Result<()> {
     }
 
     // === Phase 4+5: Appraisal & Compilation ===
-    run_phase(&mut state, &args, "appraisal_compilation").await?;
+    run_phase(&mut state, &args, "appraisal_compilation", &diff_ctx).await?;
 
     // === Report Generation (Rust, no Claude) ===
     let report = report::parse_from_workspace(&args.target)?;
@@ -163,7 +163,12 @@ async fn main() -> Result<()> {
 }
 
 /// Run a single phase with sentinel checking and state management.
-async fn run_phase(state: &mut State, args: &cli::Args, phase_name: &str) -> Result<()> {
+async fn run_phase(
+    state: &mut State,
+    args: &cli::Args,
+    phase_name: &str,
+    diff_ctx: &Option<diff::DiffContext>,
+) -> Result<()> {
     // Check if already done and sentinel still valid.
     if *state.phase_status(phase_name) == PhaseStatus::Done {
         if state::check_sentinel(&args.target, phase_name, state)? {
@@ -183,7 +188,7 @@ async fn run_phase(state: &mut State, args: &cli::Args, phase_name: &str) -> Res
     let result = match phase_name {
         "exploration" => run_exploration(state, args).await,
         "scouting" => run_scouting(state, args).await,
-        "deep_review" => run_deep_review(state, args).await,
+        "deep_review" => run_deep_review(state, args, diff_ctx).await,
         "appraisal_compilation" => run_appraisal_compilation(state, args).await,
         _ => bail!("Unknown phase: {phase_name}"),
     };
@@ -322,7 +327,11 @@ async fn run_scouting(state: &mut State, args: &cli::Args) -> Result<()> {
     Ok(())
 }
 
-async fn run_deep_review(state: &mut State, args: &cli::Args) -> Result<()> {
+async fn run_deep_review(
+    state: &mut State,
+    args: &cli::Args,
+    diff_ctx: &Option<diff::DiffContext>,
+) -> Result<()> {
     // Prune stale worktree metadata from prior runs (e.g. --keep-workspace
     // leaves .git/worktrees/ references to deleted directories, which blocks
     // branch reuse even with -B).
@@ -330,6 +339,12 @@ async fn run_deep_review(state: &mut State, args: &cli::Args) -> Result<()> {
         .args(["worktree", "prune"])
         .current_dir(&args.target)
         .output();
+
+    // In diff mode, check out the head ref in worktrees (detached).
+    let diff_head_ref = match &state.mode {
+        state::ReviewMode::Diff { head, .. } => Some(head.clone()),
+        state::ReviewMode::Full => None,
+    };
 
     // Create git worktrees and PoC dirs in parallel.
     let wt_results: Vec<Result<()>> = state
@@ -347,13 +362,22 @@ async fn run_deep_review(state: &mut State, args: &cli::Args) -> Result<()> {
                     .current_dir(&args.target)
                     .output();
             }
-            let output = std::process::Command::new("git")
-                .args(["worktree", "add"])
-                .arg(&wt_path)
-                .arg("-B")
-                .arg(format!("kuriboh-review-{}", a.reviewer_id))
-                .current_dir(&args.target)
-                .output()?;
+            let output = if let Some(ref head_ref) = diff_head_ref {
+                std::process::Command::new("git")
+                    .args(["worktree", "add", "--detach"])
+                    .arg(&wt_path)
+                    .arg(head_ref)
+                    .current_dir(&args.target)
+                    .output()?
+            } else {
+                std::process::Command::new("git")
+                    .args(["worktree", "add"])
+                    .arg(&wt_path)
+                    .arg("-B")
+                    .arg(format!("kuriboh-review-{}", a.reviewer_id))
+                    .current_dir(&args.target)
+                    .output()?
+            };
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!(
@@ -372,11 +396,19 @@ async fn run_deep_review(state: &mut State, args: &cli::Args) -> Result<()> {
         result?;
     }
 
+    let diff_info = diff_ctx.as_ref().map(|ctx| prompts::DiffPromptInfo {
+        base: ctx.base.clone(),
+        head: ctx.head.clone(),
+        changed_files: ctx.files.clone(),
+        hunks: ctx.hunks.clone(),
+    });
+
     let prompt = prompts::deep_review(
         &state.task_assignments,
         &args.target.display().to_string(),
         args.max_turns,
         args.prompt.as_deref(),
+        diff_info.as_ref(),
     );
     let events = runner::run_session(
         args,
