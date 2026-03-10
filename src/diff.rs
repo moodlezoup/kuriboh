@@ -150,7 +150,8 @@ fn split_diff_by_file(diff: &str) -> HashMap<String, String> {
             current_hunk.clear();
 
             // Extract file path from "diff --git a/path b/path".
-            if let Some(b_path) = line.split(" b/").nth(1) {
+            // Use rsplit_once to handle paths that might contain " b/".
+            if let Some((_, b_path)) = line.rsplit_once(" b/") {
                 current_file = Some(b_path.to_string());
             }
         }
@@ -164,11 +165,6 @@ fn split_diff_by_file(diff: &str) -> HashMap<String, String> {
         }
     }
     result
-}
-
-/// Get the diff hunks for a specific file, if available.
-pub fn hunks_for_file<'a>(ctx: &'a DiffContext, path: &str) -> Option<&'a str> {
-    ctx.hunks.get(path).map(|s| s.as_str())
 }
 
 #[cfg(test)]
