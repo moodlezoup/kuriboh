@@ -188,7 +188,9 @@ impl TuiApp {
         widgets::phase_bar::render(frame, chunks[0], &self.state, self.quit_requested);
 
         match self.state.current_phase_name() {
-            "deep_review" => widgets::file_tree::render(frame, chunks[1], &self.state),
+            "deep_review" | "appraisal_compilation" => {
+                widgets::file_tree::render(frame, chunks[1], &self.state);
+            }
             _ => widgets::progress::render(frame, chunks[1], &self.state),
         }
 

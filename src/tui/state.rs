@@ -151,10 +151,13 @@ impl TuiState {
                     _ => return,
                 };
                 self.phase_start_time = Instant::now();
-                // Clear file activity from prior phases/runs so the deep review
-                // view starts clean.
-                self.file_activity.clear();
-                self.reviewer_files.clear();
+                // Clear file activity when entering deep review so it starts
+                // clean. Preserve it when entering appraisal so the file tree
+                // carries over and severity counts update in place.
+                if self.current_phase != Phase::Appraisal {
+                    self.file_activity.clear();
+                    self.reviewer_files.clear();
+                }
                 self.push_log(
                     "system",
                     &format!("Phase started: {}", self.current_phase.label()),
@@ -269,11 +272,18 @@ impl TuiState {
     }
 
     /// Poll workspace files for findings. Resets finding counts before each poll
-    /// to avoid unbounded accumulation. Only polls during the deep review phase.
+    /// to avoid unbounded accumulation.
+    ///
+    /// During deep review: reads `reviewer-*.json`.
+    /// During appraisal: reads `appraised-*.json` (which reflect severity adjustments
+    /// and rejected findings filtered out).
     pub fn poll_workspace(&mut self, workspace: &Path) {
-        if self.current_phase != Phase::DeepReview {
-            return;
-        }
+        let prefix = match self.current_phase {
+            Phase::DeepReview => "reviewer-",
+            Phase::Appraisal => "appraised-",
+            _ => return,
+        };
+
         let findings_dir = workspace.join("findings");
         let Ok(entries) = std::fs::read_dir(&findings_dir) else {
             return;
@@ -291,7 +301,7 @@ impl TuiState {
                 .and_then(|n| n.to_str())
                 .unwrap_or_default();
 
-            if !fname.starts_with("reviewer-") || !fname.ends_with(".json") {
+            if !fname.starts_with(prefix) || !fname.ends_with(".json") {
                 continue;
             }
 
@@ -303,6 +313,10 @@ impl TuiState {
             };
 
             for finding in &findings {
+                // During appraisal, skip rejected findings.
+                if finding.verdict.as_deref() == Some("rejected") {
+                    continue;
+                }
                 if let Some(ref file) = finding.file {
                     let normalized = normalize_file_path(file);
                     if normalized.is_empty() {
