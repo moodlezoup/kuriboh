@@ -26,7 +26,9 @@ pub enum TuiEvent {
     ScoresLoaded(Vec<FileScore>),
     /// A reviewer was assigned to a starting file.
     ReviewerAssigned { id: u32, file: String },
-    /// The pipeline is done; TUI should shut down.
+    /// The final report is ready; show it in the TUI.
+    ReportReady { content: String },
+    /// The pipeline is done; TUI should show the report and wait for :q.
     Shutdown,
 }
 
@@ -36,6 +38,11 @@ pub struct TuiApp {
     event_rx: mpsc::UnboundedReceiver<TuiEvent>,
     workspace_path: PathBuf,
     quit_requested: bool,
+    /// When set, we're showing the final report and waiting for :q.
+    report_content: Option<String>,
+    report_scroll: u16,
+    /// Tracks `:q` input sequence.
+    colon_pressed: bool,
 }
 
 impl TuiApp {
@@ -45,6 +52,9 @@ impl TuiApp {
             event_rx,
             workspace_path,
             quit_requested: false,
+            report_content: None,
+            report_scroll: 0,
+            colon_pressed: false,
         }
     }
 
@@ -68,27 +78,47 @@ impl TuiApp {
             tokio::select! {
                 event = self.event_rx.recv() => {
                     match event {
-                        Some(TuiEvent::Shutdown) | None => break,
+                        Some(TuiEvent::ReportReady { content }) => {
+                            self.report_content = Some(content);
+                        }
+                        Some(TuiEvent::Shutdown) | None => {
+                            if self.report_content.is_some() {
+                                // Stay in report view — don't break.
+                                // Drain remaining events without blocking.
+                                self.event_rx.close();
+                            } else {
+                                break;
+                            }
+                        }
                         Some(ev) => self.state.handle_event(ev),
                     }
                 }
                 _ = tick_interval.tick() => {
                     if ct_event::poll(std::time::Duration::ZERO)? {
                         if let Event::Key(key) = ct_event::read()? {
-                            if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
-                                if self.quit_requested {
-                                    break;
+                            if key.kind == KeyEventKind::Press {
+                                if self.report_content.is_some() {
+                                    // Report view: handle :q and scrolling.
+                                    if self.handle_report_key(key.code) {
+                                        break;
+                                    }
+                                } else if key.code == KeyCode::Char('q') {
+                                    if self.quit_requested {
+                                        break;
+                                    }
+                                    self.quit_requested = true;
                                 }
-                                self.quit_requested = true;
                             }
                         }
                     }
-                    // Poll workspace files every 5 ticks (500ms)
-                    poll_counter += 1;
-                    if poll_counter.is_multiple_of(5) {
-                        self.state.poll_workspace(&self.workspace_path);
+                    if self.report_content.is_none() {
+                        // Poll workspace files every 5 ticks (500ms)
+                        poll_counter += 1;
+                        if poll_counter.is_multiple_of(5) {
+                            self.state.poll_workspace(&self.workspace_path);
+                        }
+                        self.state.decay_active_reviewers();
                     }
-                    self.state.decay_active_reviewers();
                 }
             }
         }
@@ -97,7 +127,57 @@ impl TuiApp {
         Ok(())
     }
 
+    /// Handle a keypress in report view. Returns true if we should quit.
+    fn handle_report_key(&mut self, code: KeyCode) -> bool {
+        match code {
+            KeyCode::Char(':') => {
+                self.colon_pressed = true;
+                false
+            }
+            KeyCode::Char('q') if self.colon_pressed => true,
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.report_scroll = self.report_scroll.saturating_add(1);
+                self.colon_pressed = false;
+                false
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.report_scroll = self.report_scroll.saturating_sub(1);
+                self.colon_pressed = false;
+                false
+            }
+            KeyCode::PageDown | KeyCode::Char(' ') => {
+                self.report_scroll = self.report_scroll.saturating_add(20);
+                self.colon_pressed = false;
+                false
+            }
+            KeyCode::PageUp => {
+                self.report_scroll = self.report_scroll.saturating_sub(20);
+                self.colon_pressed = false;
+                false
+            }
+            KeyCode::Home | KeyCode::Char('g') => {
+                self.report_scroll = 0;
+                self.colon_pressed = false;
+                false
+            }
+            KeyCode::End | KeyCode::Char('G') => {
+                self.report_scroll = u16::MAX;
+                self.colon_pressed = false;
+                false
+            }
+            _ => {
+                self.colon_pressed = false;
+                false
+            }
+        }
+    }
+
     fn render(&self, frame: &mut Frame) {
+        if self.report_content.is_some() {
+            self.render_report(frame);
+            return;
+        }
+
         let chunks = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(5),
@@ -113,5 +193,17 @@ impl TuiApp {
         }
 
         widgets::activity_log::render(frame, chunks[2], &self.state);
+    }
+
+    fn render_report(&self, frame: &mut Frame) {
+        let content = self.report_content.as_deref().unwrap_or_default();
+        widgets::report::render(
+            frame,
+            frame.area(),
+            content,
+            self.report_scroll,
+            &self.state,
+            self.colon_pressed,
+        );
     }
 }

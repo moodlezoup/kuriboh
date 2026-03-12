@@ -427,8 +427,10 @@ Max turns: {max_turns}{guidance}"#,
     )
 }
 
-/// Phase 4+5: Appraisal and compilation prompt.
-pub fn appraisal_and_compilation(reviewer_ids: &[u32], target: &str, max_turns: u32) -> String {
+/// Phase 4: Appraisal-only prompt (compilation is done in Rust).
+///
+/// `reviewer_ids` should only contain reviewers with non-empty findings.
+pub fn appraisal(reviewer_ids: &[u32], target: &str, max_turns: u32) -> String {
     let reviewer_list = reviewer_ids
         .iter()
         .map(|id| {
@@ -438,77 +440,53 @@ pub fn appraisal_and_compilation(reviewer_ids: &[u32], target: &str, max_turns: 
         .join("\n");
 
     format!(
-        r#"You are performing Phases 4-5 (Appraisal & Compilation) of a security review.
-
-## Phase 4: Appraisal
+        r#"You are performing Phase 4 (Appraisal) of a security review.
 
 For each completed reviewer below, spawn an **appraiser** subagent (defined in
 `.claude/agents/kuriboh_appraiser.md`) to validate their findings. Appraisers may run
 in parallel.
 
-Reviewers:
+Reviewers with findings:
 {reviewer_list}
 
 For each reviewer N:
-1. Verify `{target}/.kuriboh/findings/reviewer-N.json` exists and is valid JSON.
-   If the file is missing or empty, skip appraisal for this reviewer.
-2. Spawn the appraiser subagent with this prompt:
+1. Spawn the appraiser subagent with this prompt:
    "Appraise the findings from reviewer N.
    Findings file: {target}/.kuriboh/findings/reviewer-N.json
    Worktree path: {target}/.kuriboh/worktrees/reviewer-N
    Write appraised findings to: {target}/.kuriboh/findings/appraised-N.json"
 
-**Wait for ALL appraisers to complete** before proceeding to Phase 5.
-
-## Phase 5: Compilation
-
-Compile all appraised findings into a single deduplicated report.
-
-### Step 1: Collect findings
-Read all `{target}/.kuriboh/findings/appraised-*.json` files. Collect all findings with
-verdict "confirmed", "adjusted", or "needs-review". Discard "rejected" findings.
-
-### Step 2: Deduplicate
-Group findings by (file, title). If multiple reviewers independently found the
-same vulnerability:
-- Keep the most detailed description and recommendation.
-- Use the highest severity rating.
-- Note the number of independent reviewers who flagged this issue.
-
-### Step 3: Sort
-Sort findings by severity (CRITICAL > HIGH > MEDIUM > LOW > INFO), then by
-scout_score descending within the same severity level.
-
-### Step 4: Write compiled report
-Write `{target}/.kuriboh/compiled-findings.json` with the deduplicated, sorted findings
-as a JSON array using this schema:
-
-```json
-[
-  {{{{
-    "severity": "CRITICAL",
-    "original_severity": "HIGH",
-    "title": "Short title",
-    "file": "path/to/file.rs:line",
-    "description": "...",
-    "reachability": "...",
-    "evidence": "...",
-    "exploit_sketch": "...",
-    "repro_status": "working",
-    "recommendation": "...",
-    "call_chain": ["..."],
-    "poc_available": false,
-    "poc_validated": null,
-    "poc_path": null,
-    "scout_score": 72,
-    "verdict": "confirmed|adjusted|needs-review",
-    "appraiser_notes": "...",
-    "independent_reviewers": 2
-  }}}}
-]
-```
+**Wait for ALL appraisers to complete** before reporting Phase 4 done.
 
 Target codebase: {target}
 Max turns: {max_turns}"#
+    )
+}
+
+/// Build a prompt for LLM-based semantic deduplication of findings.
+///
+/// Groups findings by file, asks a cheap model to identify semantically
+/// duplicate findings (same vulnerability described differently), and returns
+/// a JSON array of duplicate group indices.
+pub fn semantic_dedup(findings_json: &str) -> String {
+    format!(
+        r"You are a deduplication engine for security findings. Below is a JSON array of findings
+from multiple reviewers. Some findings describe the SAME vulnerability using different
+words, line numbers, or detail levels.
+
+Your task: identify groups of findings that describe the same underlying vulnerability.
+Two findings are duplicates if they target the same code location (same file, nearby lines)
+AND describe the same class of bug, even if the titles or descriptions differ.
+
+Respond with ONLY a JSON array of duplicate groups. Each group is an array of 0-based
+indices into the input array. Only include groups with 2+ members. Findings not in any
+group are unique and should not appear in the output.
+
+Example output: [[0, 3], [1, 5, 7]]
+
+This means findings 0 and 3 are duplicates, and findings 1, 5, and 7 are duplicates.
+
+Input findings:
+{findings_json}"
     )
 }

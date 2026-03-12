@@ -251,15 +251,23 @@ pub fn check_sentinel(target: &Path, phase: &str, state: &State) -> Result<bool>
             Ok(true)
         }
         "appraisal_compilation" => {
-            let path = kb.join("compiled-findings.json");
-            match std::fs::read_to_string(&path) {
-                Ok(data) => {
-                    let v: Result<serde_json::Value, _> = serde_json::from_str(&data);
-                    Ok(v.is_ok())
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-                Err(e) => Err(e).context("checking compilation sentinel"),
+            // Check for compiled-findings.json (no-findings shortcut) or
+            // at least one appraised-*.json file (appraisal completed).
+            let compiled = kb.join("compiled-findings.json");
+            if compiled.exists() {
+                return Ok(true);
             }
+            let findings_dir = kb.join("findings");
+            if !findings_dir.exists() {
+                return Ok(false);
+            }
+            let has_appraised = std::fs::read_dir(&findings_dir)?.any(|entry| {
+                entry
+                    .ok()
+                    .and_then(|e| e.file_name().to_str().map(|s| s.to_string()))
+                    .is_some_and(|name| name.starts_with("appraised-") && name.ends_with(".json"))
+            });
+            Ok(has_appraised)
         }
         _ => bail!("unknown phase: {phase}"),
     }

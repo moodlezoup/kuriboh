@@ -225,21 +225,31 @@ fn render_finding(out: &mut String, f: &Finding) {
     out.push('\n');
 }
 
-/// Pre-deduplicate findings across all reviewers before appraisal.
-///
-/// Reads every `findings/reviewer-*.json`, groups findings by a normalized key
-/// `(file_stem, lowercase_title)`, keeps the best version per group (highest
-/// severity, then longest description), and writes the deduplicated arrays back
-/// to each reviewer's file. Returns `(total_before, total_after)`.
-pub fn pre_deduplicate_findings(target: &Path) -> Result<(usize, usize)> {
+/// Return reviewer IDs that have non-empty findings files.
+pub fn reviewers_with_findings(target: &Path, reviewer_ids: &[u32]) -> Vec<u32> {
+    reviewer_ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            let path = target.join(format!(".kuriboh/findings/reviewer-{id}.json"));
+            std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|data| serde_json::from_str::<Vec<Finding>>(&data).ok())
+                .is_some_and(|findings| !findings.is_empty())
+        })
+        .collect()
+}
+
+/// Collect all findings from reviewer files into a single flat list for
+/// semantic dedup. Returns the JSON string to send to the LLM and the
+/// parsed findings with their source reviewer IDs.
+pub fn collect_all_findings(target: &Path) -> Result<(String, Vec<(u32, Finding)>)> {
     let findings_dir = target.join(".kuriboh/findings");
     if !findings_dir.exists() {
-        return Ok((0, 0));
+        return Ok((String::from("[]"), Vec::new()));
     }
 
-    // Collect all (reviewer_id, finding) pairs.
     let mut all: Vec<(u32, Finding)> = Vec::new();
-    let mut reviewer_files: Vec<(u32, std::path::PathBuf)> = Vec::new();
 
     for entry in std::fs::read_dir(&findings_dir)
         .with_context(|| format!("reading {}", findings_dir.display()))?
@@ -250,7 +260,6 @@ pub fn pre_deduplicate_findings(target: &Path) -> Result<(usize, usize)> {
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or_default();
-        // Match reviewer-N.json but NOT appraised-N.json
         let id = match fname
             .strip_prefix("reviewer-")
             .and_then(|s| s.strip_suffix(".json"))
@@ -266,88 +275,207 @@ pub fn pre_deduplicate_findings(target: &Path) -> Result<(usize, usize)> {
             .with_context(|| format!("reading {}", path.display()))?;
         let findings: Vec<Finding> = match serde_json::from_str(&data) {
             Ok(f) => f,
-            Err(_) => continue, // malformed — skip, appraisal will handle it
+            Err(_) => continue,
         };
         for f in findings {
             all.push((id, f));
         }
-        reviewer_files.push((id, path));
     }
 
-    let total_before = all.len();
-    if total_before == 0 {
-        return Ok((0, 0));
-    }
+    // Build a compact JSON for the LLM: just index, file, title, severity.
+    let summaries: Vec<serde_json::Value> = all
+        .iter()
+        .enumerate()
+        .map(|(i, (_rid, f))| {
+            serde_json::json!({
+                "index": i,
+                "file": f.file,
+                "title": f.title,
+                "severity": f.severity,
+            })
+        })
+        .collect();
+    let json = serde_json::to_string_pretty(&summaries)?;
 
-    // Group by normalized (file_stem, title) key.
-    let mut groups: std::collections::HashMap<(String, String), Vec<(u32, Finding)>> =
-        std::collections::HashMap::new();
-    for (rid, finding) in all {
-        let key = dedup_key(&finding);
-        groups.entry(key).or_default().push((rid, finding));
-    }
-
-    // For each group, pick the winner: highest severity, then longest description.
-    let mut kept: std::collections::HashMap<u32, Vec<Finding>> = std::collections::HashMap::new();
-    for (_key, mut group) in groups {
-        // Sort: lowest Severity enum value = highest severity (Critical < High < ... < Info).
-        group.sort_by(|a, b| {
-            a.1.severity
-                .cmp(&b.1.severity)
-                .then_with(|| b.1.description.len().cmp(&a.1.description.len()))
-        });
-        let (winner_id, mut winner) = group.remove(0);
-        if !group.is_empty() {
-            // Record how many independent reviewers found this.
-            let reviewer_count = {
-                let mut ids: Vec<u32> = vec![winner_id];
-                ids.extend(group.iter().map(|(rid, _)| *rid));
-                ids.sort_unstable();
-                ids.dedup();
-                ids.len() as u32
-            };
-            if winner.independent_reviewers.unwrap_or(0) < reviewer_count {
-                winner.independent_reviewers = Some(reviewer_count);
-            }
-        }
-        kept.entry(winner_id).or_default().push(winner);
-    }
-
-    // Write back deduplicated findings per reviewer.
-    for (id, path) in &reviewer_files {
-        let findings = kept.remove(id).unwrap_or_default();
-        let json = serde_json::to_string_pretty(&findings)
-            .with_context(|| format!("serializing deduped findings for reviewer {id}"))?;
-        std::fs::write(path, json)
-            .with_context(|| format!("writing deduped {}", path.display()))?;
-    }
-
-    // Recount from what we wrote back.
-    let mut total_after = 0usize;
-    for (_id, path) in &reviewer_files {
-        let data = std::fs::read_to_string(path).unwrap_or_default();
-        let findings: Vec<serde_json::Value> = serde_json::from_str(&data).unwrap_or_default();
-        total_after += findings.len();
-    }
-
-    Ok((total_before, total_after))
+    Ok((json, all))
 }
 
-/// Compute the dedup key for a finding: (file_stem, normalized_title).
+/// Apply LLM-identified duplicate groups to a flat findings list.
 ///
-/// `file_stem` strips `:line` suffixes so `foo.rs:42` and `foo.rs:50` with the
-/// same title are considered duplicates.
-fn dedup_key(f: &Finding) -> (String, String) {
-    let file_stem = f
-        .file
-        .as_deref()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .to_string();
-    let title = f.title.trim().to_lowercase();
-    (file_stem, title)
+/// `dedup_response` is the raw LLM output: a JSON array of arrays of indices,
+/// e.g. `[[0, 3], [1, 5]]`. For each group, keeps the best finding (highest
+/// severity, longest description) and records independent reviewer count.
+/// Returns the deduplicated list.
+pub fn apply_dedup_groups(
+    mut all: Vec<(u32, Finding)>,
+    dedup_response: &str,
+) -> Vec<(u32, Finding)> {
+    // Parse duplicate groups from LLM response.
+    let groups: Vec<Vec<usize>> = extract_json_array(dedup_response).unwrap_or_default();
+
+    // Mark indices to remove (all but the winner in each group).
+    let mut remove_indices: std::collections::HashSet<usize> = std::collections::HashSet::new();
+
+    for group in &groups {
+        if group.len() < 2 {
+            continue;
+        }
+        // Find the best finding in this group.
+        let mut best_idx = group[0];
+        for &idx in &group[1..] {
+            if idx >= all.len() || best_idx >= all.len() {
+                continue;
+            }
+            let best = &all[best_idx].1;
+            let candidate = &all[idx].1;
+            if candidate.severity < best.severity
+                || (candidate.severity == best.severity
+                    && candidate.description.len() > best.description.len())
+            {
+                best_idx = idx;
+            }
+        }
+
+        // Count unique reviewers in the group.
+        let mut reviewer_ids: Vec<u32> = group
+            .iter()
+            .filter_map(|&idx| {
+                if idx < all.len() {
+                    Some(all[idx].0)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        reviewer_ids.sort_unstable();
+        reviewer_ids.dedup();
+        let reviewer_count = reviewer_ids.len() as u32;
+
+        if best_idx < all.len() {
+            let current = all[best_idx].1.independent_reviewers.unwrap_or(1);
+            if reviewer_count > current {
+                all[best_idx].1.independent_reviewers = Some(reviewer_count);
+            }
+        }
+
+        // Mark all others for removal.
+        for &idx in group {
+            if idx != best_idx && idx < all.len() {
+                remove_indices.insert(idx);
+            }
+        }
+    }
+
+    // Remove duplicates (iterate in reverse to preserve indices).
+    let mut sorted_removes: Vec<usize> = remove_indices.into_iter().collect();
+    sorted_removes.sort_unstable_by(|a, b| b.cmp(a));
+    for idx in sorted_removes {
+        if idx < all.len() {
+            all.remove(idx);
+        }
+    }
+
+    all
+}
+
+/// Extract a JSON array from an LLM response that may contain markdown fences
+/// or surrounding text.
+fn extract_json_array(response: &str) -> Option<Vec<Vec<usize>>> {
+    let trimmed = response.trim();
+    // Try direct parse first.
+    if let Ok(v) = serde_json::from_str(trimmed) {
+        return Some(v);
+    }
+    // Try stripping markdown code fences.
+    let stripped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .unwrap_or(trimmed);
+    let stripped = stripped.strip_suffix("```").unwrap_or(stripped).trim();
+    serde_json::from_str(stripped).ok()
+}
+
+/// Write deduplicated findings back to per-reviewer files. Used after semantic
+/// dedup to update the files before appraisal.
+pub fn write_deduped_findings(target: &Path, all: &[(u32, Finding)]) -> Result<()> {
+    let findings_dir = target.join(".kuriboh/findings");
+
+    // Group by reviewer.
+    let mut per_reviewer: std::collections::HashMap<u32, Vec<&Finding>> =
+        std::collections::HashMap::new();
+    for (rid, finding) in all {
+        per_reviewer.entry(*rid).or_default().push(finding);
+    }
+
+    // Write each reviewer's file.
+    for (id, findings) in &per_reviewer {
+        let path = findings_dir.join(format!("reviewer-{id}.json"));
+        let json = serde_json::to_string_pretty(findings)
+            .with_context(|| format!("serializing deduped findings for reviewer {id}"))?;
+        std::fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+    }
+
+    // Write empty arrays for reviewers whose findings were all deduped away.
+    for entry in std::fs::read_dir(&findings_dir)?.flatten() {
+        let fname = entry.file_name().to_str().unwrap_or_default().to_string();
+        if let Some(id_str) = fname
+            .strip_prefix("reviewer-")
+            .and_then(|s| s.strip_suffix(".json"))
+        {
+            if let Ok(id) = id_str.parse::<u32>() {
+                if !per_reviewer.contains_key(&id) {
+                    std::fs::write(entry.path(), "[]")?;
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Compile appraised findings into `compiled-findings.json`.
+///
+/// Reads all `appraised-*.json` files, filters by verdict, sorts by severity
+/// then scout_score, and writes the result. This replaces the LLM-based Phase 5.
+pub fn compile_findings(target: &Path) -> Result<usize> {
+    let findings_dir = target.join(".kuriboh/findings");
+    let mut all_findings: Vec<Finding> = Vec::new();
+
+    if findings_dir.exists() {
+        for entry in std::fs::read_dir(&findings_dir)?.flatten() {
+            let fname = entry.file_name().to_str().unwrap_or_default().to_string();
+            if !fname.starts_with("appraised-") || !fname.ends_with(".json") {
+                continue;
+            }
+            let Ok(data) = std::fs::read_to_string(entry.path()) else {
+                continue;
+            };
+            let Ok(findings) = serde_json::from_str::<Vec<Finding>>(&data) else {
+                continue;
+            };
+            for f in findings {
+                // Keep confirmed, adjusted, and needs-review. Discard rejected.
+                let dominated = f.verdict.as_deref() == Some("rejected");
+                if !dominated {
+                    all_findings.push(f);
+                }
+            }
+        }
+    }
+
+    // Sort: severity ascending (Critical < High < ... < Info, thanks to derived Ord),
+    // then scout_score descending within same severity.
+    all_findings.sort_by(|a, b| {
+        a.severity
+            .cmp(&b.severity)
+            .then_with(|| b.scout_score.unwrap_or(0).cmp(&a.scout_score.unwrap_or(0)))
+    });
+
+    let count = all_findings.len();
+    let json = serde_json::to_string_pretty(&all_findings)?;
+    std::fs::write(target.join(".kuriboh/compiled-findings.json"), json)?;
+
+    Ok(count)
 }
 
 /// Build a report by reading workspace artifacts directly (no event stream).
@@ -631,142 +759,180 @@ Needs review stuff.";
     }
 
     #[test]
-    fn pre_dedup_removes_duplicates() {
+    fn apply_dedup_groups_merges_duplicates() {
+        let findings = vec![
+            (
+                1,
+                Finding {
+                    severity: Severity::High,
+                    title: "Buffer overflow".into(),
+                    file: Some("src/foo.rs:42".into()),
+                    description: "Detailed description of the overflow".into(),
+                    recommendation: "Fix".into(),
+                    source_agent: None,
+                    scout_score: None,
+                    call_chain: vec![],
+                    reachability: None,
+                    evidence: None,
+                    exploit_sketch: None,
+                    repro_status: None,
+                    poc_available: false,
+                    poc_validated: None,
+                    poc_path: None,
+                    original_severity: None,
+                    verdict: None,
+                    appraiser_notes: None,
+                    independent_reviewers: None,
+                },
+            ),
+            (
+                2,
+                Finding {
+                    severity: Severity::Medium,
+                    title: "Buffer overflow in foo".into(),
+                    file: Some("src/foo.rs:50".into()),
+                    description: "Short".into(),
+                    recommendation: "Fix".into(),
+                    source_agent: None,
+                    scout_score: None,
+                    call_chain: vec![],
+                    reachability: None,
+                    evidence: None,
+                    exploit_sketch: None,
+                    repro_status: None,
+                    poc_available: false,
+                    poc_validated: None,
+                    poc_path: None,
+                    original_severity: None,
+                    verdict: None,
+                    appraiser_notes: None,
+                    independent_reviewers: None,
+                },
+            ),
+            (
+                2,
+                Finding {
+                    severity: Severity::Low,
+                    title: "Missing error handling".into(),
+                    file: Some("src/bar.rs:10".into()),
+                    description: "Unwrap on network input".into(),
+                    recommendation: "Use ?".into(),
+                    source_agent: None,
+                    scout_score: None,
+                    call_chain: vec![],
+                    reachability: None,
+                    evidence: None,
+                    exploit_sketch: None,
+                    repro_status: None,
+                    poc_available: false,
+                    poc_validated: None,
+                    poc_path: None,
+                    original_severity: None,
+                    verdict: None,
+                    appraiser_notes: None,
+                    independent_reviewers: None,
+                },
+            ),
+        ];
+
+        // LLM says findings 0 and 1 are duplicates.
+        let result = apply_dedup_groups(findings, "[[0, 1]]");
+        assert_eq!(result.len(), 2);
+        // Winner should be the HIGH severity one (index 0).
+        assert_eq!(result[0].1.severity, Severity::High);
+        assert_eq!(result[0].1.independent_reviewers, Some(2));
+        assert_eq!(result[1].1.title, "Missing error handling");
+    }
+
+    #[test]
+    fn apply_dedup_groups_empty_response() {
+        let findings = vec![(
+            1,
+            Finding {
+                severity: Severity::High,
+                title: "Test".into(),
+                file: None,
+                description: "d".into(),
+                recommendation: "r".into(),
+                source_agent: None,
+                scout_score: None,
+                call_chain: vec![],
+                reachability: None,
+                evidence: None,
+                exploit_sketch: None,
+                repro_status: None,
+                poc_available: false,
+                poc_validated: None,
+                poc_path: None,
+                original_severity: None,
+                verdict: None,
+                appraiser_notes: None,
+                independent_reviewers: None,
+            },
+        )];
+        let result = apply_dedup_groups(findings, "[]");
+        assert_eq!(result.len(), 1);
+    }
+
+    #[test]
+    fn extract_json_array_with_fences() {
+        let response = "```json\n[[0, 1], [2, 3]]\n```";
+        let result = extract_json_array(response).unwrap();
+        assert_eq!(result, vec![vec![0, 1], vec![2, 3]]);
+    }
+
+    #[test]
+    fn extract_json_array_plain() {
+        let result = extract_json_array("[[0, 2]]").unwrap();
+        assert_eq!(result, vec![vec![0, 2]]);
+    }
+
+    #[test]
+    fn compile_findings_sorts_by_severity() {
         let dir = tempfile::tempdir().unwrap();
         let findings_dir = dir.path().join(".kuriboh/findings");
         std::fs::create_dir_all(&findings_dir).unwrap();
 
-        // Reviewer 1: HIGH buffer overflow in foo.rs
-        let r1 = serde_json::json!([{
-            "severity": "HIGH",
-            "title": "Buffer overflow",
-            "file": "src/foo.rs:42",
-            "description": "Writes past buffer end via unchecked index",
-            "recommendation": "Add bounds check"
-        }]);
-        std::fs::write(
-            findings_dir.join("reviewer-1.json"),
-            serde_json::to_string(&r1).unwrap(),
-        )
-        .unwrap();
-
-        // Reviewer 2: same finding (different line) + a unique finding
-        let r2 = serde_json::json!([
-            {
-                "severity": "MEDIUM",
-                "title": "Buffer overflow",
-                "file": "src/foo.rs:50",
-                "description": "Short desc",
-                "recommendation": "Fix it"
-            },
-            {
-                "severity": "LOW",
-                "title": "Missing error handling",
-                "file": "src/bar.rs:10",
-                "description": "Unwrap on network input",
-                "recommendation": "Use ?"
-            }
+        let appraised = serde_json::json!([
+            {"severity": "LOW", "title": "Low finding", "description": "d",
+             "recommendation": "r", "verdict": "confirmed"},
+            {"severity": "HIGH", "title": "High finding", "description": "d",
+             "recommendation": "r", "verdict": "confirmed"},
+            {"severity": "MEDIUM", "title": "Rejected", "description": "d",
+             "recommendation": "r", "verdict": "rejected"}
         ]);
         std::fs::write(
-            findings_dir.join("reviewer-2.json"),
-            serde_json::to_string(&r2).unwrap(),
-        )
-        .unwrap();
-
-        let (before, after) = pre_deduplicate_findings(dir.path()).unwrap();
-        assert_eq!(before, 3);
-        assert_eq!(after, 2); // one duplicate removed
-
-        // The kept buffer overflow should be the HIGH one (higher severity).
-        let r1_data = std::fs::read_to_string(findings_dir.join("reviewer-1.json")).unwrap();
-        let r1_findings: Vec<Finding> = serde_json::from_str(&r1_data).unwrap();
-        assert_eq!(r1_findings.len(), 1);
-        assert_eq!(r1_findings[0].severity, Severity::High);
-        assert_eq!(r1_findings[0].independent_reviewers, Some(2));
-
-        // Reviewer 2 keeps only the unique finding.
-        let r2_data = std::fs::read_to_string(findings_dir.join("reviewer-2.json")).unwrap();
-        let r2_findings: Vec<Finding> = serde_json::from_str(&r2_data).unwrap();
-        assert_eq!(r2_findings.len(), 1);
-        assert_eq!(r2_findings[0].title, "Missing error handling");
-    }
-
-    #[test]
-    fn pre_dedup_no_findings_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let (before, after) = pre_deduplicate_findings(dir.path()).unwrap();
-        assert_eq!(before, 0);
-        assert_eq!(after, 0);
-    }
-
-    #[test]
-    fn pre_dedup_empty_findings() {
-        let dir = tempfile::tempdir().unwrap();
-        let findings_dir = dir.path().join(".kuriboh/findings");
-        std::fs::create_dir_all(&findings_dir).unwrap();
-        std::fs::write(findings_dir.join("reviewer-1.json"), "[]").unwrap();
-
-        let (before, after) = pre_deduplicate_findings(dir.path()).unwrap();
-        assert_eq!(before, 0);
-        assert_eq!(after, 0);
-    }
-
-    #[test]
-    fn pre_dedup_skips_appraised_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let findings_dir = dir.path().join(".kuriboh/findings");
-        std::fs::create_dir_all(&findings_dir).unwrap();
-
-        let finding = serde_json::json!([{
-            "severity": "HIGH",
-            "title": "Test",
-            "description": "desc",
-            "recommendation": "fix"
-        }]);
-        std::fs::write(
-            findings_dir.join("reviewer-1.json"),
-            serde_json::to_string(&finding).unwrap(),
-        )
-        .unwrap();
-        std::fs::write(
             findings_dir.join("appraised-1.json"),
-            serde_json::to_string(&finding).unwrap(),
+            serde_json::to_string(&appraised).unwrap(),
         )
         .unwrap();
 
-        let (before, after) = pre_deduplicate_findings(dir.path()).unwrap();
-        assert_eq!(before, 1);
-        assert_eq!(after, 1);
+        let count = compile_findings(dir.path()).unwrap();
+        assert_eq!(count, 2); // rejected one filtered
+
+        let data =
+            std::fs::read_to_string(dir.path().join(".kuriboh/compiled-findings.json")).unwrap();
+        let compiled: Vec<Finding> = serde_json::from_str(&data).unwrap();
+        assert_eq!(compiled[0].severity, Severity::High);
+        assert_eq!(compiled[1].severity, Severity::Low);
     }
 
     #[test]
-    fn dedup_key_strips_line_numbers() {
-        let f = Finding {
-            severity: Severity::High,
-            title: " Buffer Overflow ".into(),
-            file: Some("src/foo.rs:42".into()),
-            description: String::new(),
-            recommendation: String::new(),
-            source_agent: None,
-            scout_score: None,
-            call_chain: vec![],
-            reachability: None,
-            evidence: None,
-            exploit_sketch: None,
-            repro_status: None,
-            poc_available: false,
-            poc_validated: None,
-            poc_path: None,
-            original_severity: None,
-            verdict: None,
-            appraiser_notes: None,
-            independent_reviewers: None,
-        };
-        let key = super::dedup_key(&f);
-        assert_eq!(
-            key,
-            ("src/foo.rs".to_string(), "buffer overflow".to_string())
-        );
+    fn reviewers_with_findings_filters_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings_dir = dir.path().join(".kuriboh/findings");
+        std::fs::create_dir_all(&findings_dir).unwrap();
+
+        std::fs::write(findings_dir.join("reviewer-1.json"), "[]").unwrap();
+        std::fs::write(
+            findings_dir.join("reviewer-2.json"),
+            r#"[{"severity":"HIGH","title":"t","description":"d","recommendation":"r"}]"#,
+        )
+        .unwrap();
+        std::fs::write(findings_dir.join("reviewer-3.json"), "[]").unwrap();
+
+        let result = reviewers_with_findings(dir.path(), &[1, 2, 3]);
+        assert_eq!(result, vec![2]);
     }
 
     #[test]

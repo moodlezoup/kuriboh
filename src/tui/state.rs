@@ -178,7 +178,7 @@ impl TuiState {
             TuiEvent::Claude(ref claude_event) => {
                 self.handle_claude_event(claude_event);
             }
-            TuiEvent::Shutdown => {}
+            TuiEvent::ReportReady { .. } | TuiEvent::Shutdown => {}
         }
     }
 

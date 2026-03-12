@@ -14,9 +14,9 @@ pub struct Args {
     #[arg(short, long, value_name = "PATH")]
     pub target: PathBuf,
 
-    /// Where to write the final security report (default: ./kuriboh-report.md)
-    #[arg(short, long, value_name = "PATH", default_value = "kuriboh-report.md")]
-    pub output: PathBuf,
+    /// Where to write the final security report (default: .kuriboh/kuriboh-report.md)
+    #[arg(short, long, value_name = "PATH")]
+    pub output: Option<PathBuf>,
 
     /// Path to a TOML config file for customizing agent definitions.
     ///

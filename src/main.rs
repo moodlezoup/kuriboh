@@ -40,7 +40,13 @@ async fn main() -> Result<()> {
         bail!("--target {} is not a directory", args.target.display());
     }
 
-    if let Some(parent) = args.output.parent() {
+    // Default output goes under .kuriboh/ so cleanup handles it.
+    let output = args
+        .output
+        .clone()
+        .unwrap_or_else(|| args.target.join(".kuriboh/kuriboh-report.md"));
+
+    if let Some(parent) = output.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             bail!(
                 "--output parent directory does not exist: {}",
@@ -52,6 +58,14 @@ async fn main() -> Result<()> {
     if args.estimate {
         print_estimate(&args);
         return Ok(());
+    }
+
+    if !args.dangerously_skip_permissions {
+        bail!(
+            "--dangerously-skip-permissions is required. Without it, inner Claude Code \
+             sessions will prompt for tool permissions that nobody can approve.\n\
+             This flag is safe when running inside a sandbox (Docker, bubblewrap, Seatbelt)."
+        );
     }
 
     // Resolve diff context if --diff or --pr was provided.
@@ -142,18 +156,18 @@ async fn main() -> Result<()> {
     state.save(&args.target)?;
 
     // Spawn TUI if requested.
-    let tui_tx: TuiTx = if args.tui {
+    let (tui_tx, tui_handle): (TuiTx, Option<tokio::task::JoinHandle<()>>) = if args.tui {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let workspace = args.target.join(".kuriboh");
         let tui_app = tui::TuiApp::new(rx, workspace);
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             if let Err(e) = tui_app.run().await {
                 tracing::warn!(err = %e, "TUI exited with error");
             }
         });
-        Some(tx)
+        (Some(tx), Some(handle))
     } else {
-        None
+        (None, None)
     };
 
     // === Phase 1: Exploration ===
@@ -165,22 +179,19 @@ async fn main() -> Result<()> {
     // === Phase 3: Deep Review ===
     run_phase(&mut state, &args, "deep_review", &diff_ctx, &tui_tx).await?;
 
-    // Pre-deduplicate findings across reviewers (Rust-side, before appraisal).
-    match report::pre_deduplicate_findings(&args.target) {
+    // Semantic dedup: use a cheap LLM to identify duplicate findings across reviewers.
+    match semantic_dedup(&args, &tui_tx).await {
         Ok((before, after)) if before > 0 => {
             let removed = before - after;
-            info!(
-                before,
-                after, removed, "Pre-deduplicated findings across reviewers"
-            );
+            info!(before, after, removed, "Semantically deduplicated findings");
         }
         Ok(_) => {}
         Err(e) => {
-            tracing::warn!(err = %e, "Pre-dedup failed, continuing with raw findings");
+            tracing::warn!(err = %e, "Semantic dedup failed, continuing with raw findings");
         }
     }
 
-    // === Phase 4+5: Appraisal & Compilation ===
+    // === Phase 4: Appraisal (only reviewers with findings) ===
     run_phase(
         &mut state,
         &args,
@@ -190,25 +201,54 @@ async fn main() -> Result<()> {
     )
     .await?;
 
+    // === Phase 5: Compilation (Rust, no Claude) ===
+    let compiled_count = report::compile_findings(&args.target)?;
+    info!(compiled_count, "Compiled findings from appraised files");
+
     // === Report Generation (Rust, no Claude) ===
     let report = report::parse_from_workspace(&args.target)?;
-    report::write(&report, &args.output, args.json)?;
+    report::write(&report, &output, args.json)?;
 
-    // Shut down TUI before cleanup.
-    if let Some(tx) = tui_tx {
+    // Send report to TUI and wait for user to dismiss with :q.
+    if let Some(tx) = &tui_tx {
+        let report_content = std::fs::read_to_string(&output).unwrap_or_default();
+        let _ = tx.send(tui::TuiEvent::ReportReady {
+            content: report_content,
+        });
         let _ = tx.send(tui::TuiEvent::Shutdown);
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    }
+    // Wait for TUI task to finish (user presses :q).
+    if let Some(handle) = tui_handle {
+        let _ = handle.await;
     }
 
-    if !args.keep_workspace {
+    if args.keep_workspace {
+        info!(
+            output = %output.display(),
+            cost_usd = report.total_cost_usd,
+            "Review complete"
+        );
+    } else {
+        // Move the report out of .kuriboh/ before cleanup deletes it.
+        let final_output = if output.starts_with(args.target.join(".kuriboh")) {
+            let dest = args.target.join(
+                output
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("kuriboh-report.md")),
+            );
+            std::fs::copy(&output, &dest)
+                .with_context(|| format!("copying report to {}", dest.display()))?;
+            dest
+        } else {
+            output.clone()
+        };
         agents::cleanup(&args.target)?;
+        info!(
+            output = %final_output.display(),
+            cost_usd = report.total_cost_usd,
+            "Review complete"
+        );
     }
-
-    info!(
-        output = %args.output.display(),
-        cost_usd = report.total_cost_usd,
-        "Review complete"
-    );
     Ok(())
 }
 
@@ -278,6 +318,46 @@ async fn run_phase(
             Err(e).with_context(|| format!("Phase {phase_name} failed"))
         }
     }
+}
+
+/// Run semantic deduplication of findings using a cheap LLM model.
+/// Returns (total_before, total_after).
+async fn semantic_dedup(args: &cli::Args, tui_tx: &TuiTx) -> Result<(usize, usize)> {
+    let (findings_json, all_findings) = report::collect_all_findings(&args.target)?;
+    let total_before = all_findings.len();
+
+    if total_before < 2 {
+        return Ok((total_before, total_before));
+    }
+
+    let prompt = prompts::semantic_dedup(&findings_json);
+    let events = runner::run_session(
+        args,
+        &runner::SessionOpts {
+            prompt,
+            agent_teams: false,
+            model: Some("claude-haiku-4-5-20251001".to_string()),
+        },
+        tui_tx.as_ref(),
+    )
+    .await?;
+
+    // Extract the LLM's text response.
+    let response = events
+        .iter()
+        .find_map(|ev| match ev {
+            events::ClaudeEvent::Result { result, .. } => Some(result.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let deduped = report::apply_dedup_groups(all_findings, &response);
+    let total_after = deduped.len();
+
+    // Write back deduplicated findings per reviewer.
+    report::write_deduped_findings(&args.target, &deduped)?;
+
+    Ok((total_before, total_after))
 }
 
 // --- Phase implementations ---
@@ -540,13 +620,29 @@ async fn run_appraisal_compilation(
     args: &cli::Args,
     tui_tx: &TuiTx,
 ) -> Result<()> {
-    let reviewer_ids: Vec<u32> = state
+    let all_ids: Vec<u32> = state
         .task_assignments
         .iter()
         .map(|a| a.reviewer_id)
         .collect();
-    let prompt = prompts::appraisal_and_compilation(
-        &reviewer_ids,
+    let non_empty_ids = report::reviewers_with_findings(&args.target, &all_ids);
+
+    if non_empty_ids.is_empty() {
+        info!("No reviewers produced findings, skipping appraisal");
+        // Write empty compiled-findings.json so sentinel passes.
+        std::fs::write(args.target.join(".kuriboh/compiled-findings.json"), "[]")?;
+        state.phase_mut("appraisal_compilation").cost_usd = Some(0.0);
+        return Ok(());
+    }
+
+    info!(
+        total = all_ids.len(),
+        with_findings = non_empty_ids.len(),
+        "Appraising reviewers with findings"
+    );
+
+    let prompt = prompts::appraisal(
+        &non_empty_ids,
         &args.target.display().to_string(),
         args.max_turns,
     );
