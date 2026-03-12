@@ -437,7 +437,15 @@ pub fn write_deduped_findings(target: &Path, all: &[(u32, Finding)]) -> Result<(
 ///
 /// Reads all `appraised-*.json` files, filters by verdict, sorts by severity
 /// then scout_score, and writes the result. This replaces the LLM-based Phase 5.
-pub fn compile_findings(target: &Path) -> Result<usize> {
+/// Compile appraised findings into `compiled-findings.json`.
+///
+/// Reads all `appraised-*.json` files, filters by verdict, sorts by severity
+/// then scout_score, and writes the result.
+///
+/// In diff mode, `diff_files` contains the set of changed file paths. Findings
+/// in files outside the diff are kept only if severity is HIGH or CRITICAL;
+/// INFO, LOW, and MEDIUM findings outside the diff are filtered out.
+pub fn compile_findings(target: &Path, diff_files: Option<&[String]>) -> Result<usize> {
     let findings_dir = target.join(".kuriboh/findings");
     let mut all_findings: Vec<Finding> = Vec::new();
 
@@ -454,11 +462,22 @@ pub fn compile_findings(target: &Path) -> Result<usize> {
                 continue;
             };
             for f in findings {
-                // Keep confirmed, adjusted, and needs-review. Discard rejected.
-                let dominated = f.verdict.as_deref() == Some("rejected");
-                if !dominated {
-                    all_findings.push(f);
+                // Discard rejected findings.
+                if f.verdict.as_deref() == Some("rejected") {
+                    continue;
                 }
+                // In diff mode, filter low-severity findings for files outside the diff.
+                if let Some(changed) = diff_files {
+                    if !is_in_diff(&f, changed)
+                        && matches!(
+                            f.severity,
+                            Severity::Info | Severity::Low | Severity::Medium
+                        )
+                    {
+                        continue;
+                    }
+                }
+                all_findings.push(f);
             }
         }
     }
@@ -476,6 +495,18 @@ pub fn compile_findings(target: &Path) -> Result<usize> {
     std::fs::write(target.join(".kuriboh/compiled-findings.json"), json)?;
 
     Ok(count)
+}
+
+/// Check whether a finding's file is in the set of diff-changed files.
+/// Strips `:line` suffixes from the finding's file path before comparing.
+fn is_in_diff(finding: &Finding, diff_files: &[String]) -> bool {
+    let file = match finding.file.as_deref() {
+        Some(f) => f,
+        None => return false,
+    };
+    // Strip `:line` suffix.
+    let path = file.split(':').next().unwrap_or(file);
+    diff_files.iter().any(|d| d == path)
 }
 
 /// Build a report by reading workspace artifacts directly (no event stream).
@@ -907,7 +938,7 @@ Needs review stuff.";
         )
         .unwrap();
 
-        let count = compile_findings(dir.path()).unwrap();
+        let count = compile_findings(dir.path(), None).unwrap();
         assert_eq!(count, 2); // rejected one filtered
 
         let data =
@@ -915,6 +946,44 @@ Needs review stuff.";
         let compiled: Vec<Finding> = serde_json::from_str(&data).unwrap();
         assert_eq!(compiled[0].severity, Severity::High);
         assert_eq!(compiled[1].severity, Severity::Low);
+    }
+
+    #[test]
+    fn compile_findings_filters_low_severity_outside_diff() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings_dir = dir.path().join(".kuriboh/findings");
+        std::fs::create_dir_all(&findings_dir).unwrap();
+
+        let appraised = serde_json::json!([
+            {"severity": "HIGH", "title": "High in diff", "file": "src/changed.rs:10",
+             "description": "d", "recommendation": "r", "verdict": "confirmed"},
+            {"severity": "LOW", "title": "Low in diff", "file": "src/changed.rs:20",
+             "description": "d", "recommendation": "r", "verdict": "confirmed"},
+            {"severity": "HIGH", "title": "High outside diff", "file": "src/other.rs:5",
+             "description": "d", "recommendation": "r", "verdict": "confirmed"},
+            {"severity": "MEDIUM", "title": "Medium outside diff", "file": "src/other.rs:15",
+             "description": "d", "recommendation": "r", "verdict": "confirmed"},
+            {"severity": "LOW", "title": "Low outside diff", "file": "src/other.rs:25",
+             "description": "d", "recommendation": "r", "verdict": "confirmed"}
+        ]);
+        std::fs::write(
+            findings_dir.join("appraised-1.json"),
+            serde_json::to_string(&appraised).unwrap(),
+        )
+        .unwrap();
+
+        let diff_files = vec!["src/changed.rs".to_string()];
+        let count = compile_findings(dir.path(), Some(&diff_files)).unwrap();
+        // HIGH in diff, LOW in diff, HIGH outside diff = 3 kept
+        // MEDIUM outside diff and LOW outside diff = 2 filtered
+        assert_eq!(count, 3);
+
+        let data =
+            std::fs::read_to_string(dir.path().join(".kuriboh/compiled-findings.json")).unwrap();
+        let compiled: Vec<Finding> = serde_json::from_str(&data).unwrap();
+        assert_eq!(compiled[0].title, "High in diff");
+        assert_eq!(compiled[1].title, "High outside diff");
+        assert_eq!(compiled[2].title, "Low in diff");
     }
 
     #[test]

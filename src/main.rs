@@ -202,7 +202,13 @@ async fn main() -> Result<()> {
     .await?;
 
     // === Phase 5: Compilation (Rust, no Claude) ===
-    let compiled_count = report::compile_findings(&args.target)?;
+    let diff_paths: Option<Vec<String>> = match &state.mode {
+        state::ReviewMode::Diff { changed_files, .. } => {
+            Some(changed_files.iter().map(|f| f.path.clone()).collect())
+        }
+        state::ReviewMode::Full => None,
+    };
+    let compiled_count = report::compile_findings(&args.target, diff_paths.as_deref())?;
     info!(compiled_count, "Compiled findings from appraised files");
 
     // === Report Generation (Rust, no Claude) ===
